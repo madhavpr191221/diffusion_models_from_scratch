@@ -46,9 +46,18 @@ Use a compact U-Net: input convolution, widths 32/64/128, three downsampling tra
 
 ## Stage 4 — Training and measured baseline
 
-Use the published training split and the validation split without using labels. For each training batch, sample `x0`, one uniform timestep per image, and Gaussian `eps`; call the direct forward process; predict noise; minimize mean squared error. Use AdamW at `2e-4`, seed 42, and initial batch size 8. Keep configuration in `configs/base.toml` and save the resolved configuration with each run. Do not use the test split in v1.
+For each training batch, load image tensors only from the published `train` split, sample `x0`, one uniform zero-based timestep per image, and Gaussian `eps`; use `q_sample` to construct `x_t`; predict noise; minimize `mean((eps - eps_theta(x_t,t))^2)`. The training split has 16,200 images. Evaluate all 5,400 validation images after each epoch, using the same seeded timesteps/noise on every pass. The test split is neither loaded nor evaluated in Stage 4. Use AdamW at `2e-4`, seed 42, batch size 8, and five epochs unless the pilot shows that the selected batch size does not fit or the runtime is impractical. Do not use labels, augmentation, mixed precision, or distributed training.
 
-First run a tiny-subset debug/overfit pass. Measure wall time and peak GPU memory, then confirm or adjust the baseline batch size and epoch count. The proposed initial baseline is 5 epochs. Log epoch-level train/validation noise MSE, elapsed time, and GPU memory where available. Save checkpoints and run metadata under `runs/<run-id>/`. Do not add tracking services or a complicated resume system. Acceptance: pilot and chosen baseline complete with finite loss and a loadable checkpoint, or an explicit resource limitation is recorded.
+Run the fixed pilot first: select 64 training images deterministically and run 200 updates, cycling over that subset. Measure update time and peak GPU memory, and inspect the per-update loss for finite values and a downward trend. Then run the configured baseline over all training images. Commands:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.train --pilot
+uv run --locked python -m ddpm_eurosat.train
+```
+
+Each `runs/<run-id>/` stores the resolved configuration and device/environment, `status.json`, append-only per-update and per-epoch `metrics.jsonl`, a checkpoint manifest, and `.pt` files. Save progress snapshots at 25%, 50%, 75%, and 100% of planned optimizer updates, plus `best-val.pt` and replaceable resumable `latest.pt`. Checkpoints include model/optimizer state, update and batch position, config, and random-number-generator state; writes use atomic replacement. Resume with `uv run --locked python -m ddpm_eurosat.train --resume runs/<run-id>/checkpoints/latest.pt`.
+
+The CLI owns training. The existing local React application adds a Training Monitor that reads run list/status, incremental metrics, and checkpoint metadata through read-only API routes. It polls while a run is active and plots raw training loss, a 100-update moving average, and full validation loss by epoch. It also shows progress, device, elapsed time, throughput, and peak GPU memory when available. There is no separate TensorBoard UI or tracking service. Interpret loss as noise-prediction performance, not generated-image quality. Stage 4 is complete when the pilot and baseline have finite losses, the baseline produces resumable checkpoints, and the React monitor displays the run artifacts.
 
 ## Stage 5 — Reverse sampling and generated evidence
 
@@ -58,7 +67,7 @@ Verify one reverse step and a complete smoke loop using a reduced timestep count
 
 ## Stage 6 — Extend the React/TypeScript local UI
 
-Extend the Stage 2.5 React/TypeScript/Vite UI and existing local FastAPI service. Keep the interface local and focused on learning:
+Extend the Stage 2.5 React/TypeScript/Vite UI and existing local FastAPI service. The run monitor is delivered in Stage 4; Stage 6 can build on its run artifacts for dataset summaries and generation. Keep the interface local and focused on learning:
 
 - Overview: runtime/device state, dataset summary, and available runs.
 - Data view: sample grid and forward-noising display for a selected image/timestep.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import io
+import json
+import re
 import threading
 import tomllib
 from dataclasses import dataclass
@@ -32,6 +34,26 @@ SCHEDULE = DiffusionSchedule(
 )
 
 app = FastAPI(title="Unconditional EuroSAT DDPM viewer")
+RUNS_ROOT = PROJECT_ROOT / "runs"
+
+
+def get_run_dir(run_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}", run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    run_dir = RUNS_ROOT / run_id
+    if not run_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run_dir
+
+
+def read_run_json(run_dir: Path, filename: str, default: object) -> object:
+    path = run_dir / filename
+    if not path.is_file():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise HTTPException(status_code=500, detail=f"Run artifact {filename} is unreadable") from error
 
 
 @lru_cache(maxsize=1)
@@ -86,7 +108,84 @@ class CreateTraceRequest(BaseModel):
 
 @app.get("/api/health")
 def health() -> dict[str, str | bool]:
-    return {"status": "ok", "dataset_ready": True, "model_trained": False}
+    trained = False
+    if RUNS_ROOT.exists():
+        for path in RUNS_ROOT.iterdir():
+            if not path.is_dir():
+                continue
+            status = read_run_json(path, "status.json", {})
+            if (
+                isinstance(status, dict)
+                and status.get("state") == "completed"
+                and status.get("mode") == "train"
+                and (path / "checkpoints" / "best-val.pt").is_file()
+            ):
+                trained = True
+                break
+    return {"status": "ok", "dataset_ready": True, "model_trained": trained}
+
+
+@app.get("/api/runs")
+def list_runs() -> dict[str, list[dict[str, object]]]:
+    items: list[dict[str, object]] = []
+    if RUNS_ROOT.is_dir():
+        for run_dir in RUNS_ROOT.iterdir():
+            if not run_dir.is_dir():
+                continue
+            status = read_run_json(run_dir, "status.json", {})
+            run_config = read_run_json(run_dir, "config.json", {})
+            if not isinstance(status, dict) or not isinstance(run_config, dict):
+                continue
+            items.append(
+                {
+                    "run_id": run_dir.name,
+                    "state": status.get("state", "unknown"),
+                    "mode": status.get("mode", "train"),
+                    "global_step": status.get("global_step", 0),
+                    "epoch": status.get("epoch", 0),
+                    "total_epochs": status.get("total_epochs", 0),
+                    "created_at": run_config.get("created_at"),
+                    "updated_at": status.get("updated_at"),
+                }
+            )
+    items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"items": items}
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    return {
+        "run_id": run_id,
+        "status": read_run_json(run_dir, "status.json", {}),
+        "run": read_run_json(run_dir, "config.json", {}),
+    }
+
+
+@app.get("/api/runs/{run_id}/metrics")
+def get_run_metrics(
+    run_id: str,
+    after_event: int = Query(default=0, ge=0),
+) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    path = run_dir / "metrics.jsonl"
+    events: list[dict[str, object]] = []
+    if path.is_file():
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if int(event.get("event_id", 0)) > after_event:
+                    events.append(event)
+    return {"items": events}
+
+
+@app.get("/api/runs/{run_id}/checkpoints")
+def get_run_checkpoints(run_id: str) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    return {"items": read_run_json(run_dir, "checkpoint_manifest.json", [])}
 
 
 @app.get("/api/learning-log")

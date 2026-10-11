@@ -37,6 +37,21 @@ npm run dev --prefix web
 
 Open the local URL printed by Vite. The viewer lets you select validation images and inspect direct marginal or stepwise forward noising; no trained model is needed. The production frontend is served by the API after `npm run build --prefix web`.
 
+## Stage 4 training
+
+Start with the small GPU pilot, then run the configured five-epoch baseline:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.train --pilot
+uv run --locked python -m ddpm_eurosat.train
+```
+
+Training uses the train split only; validation is used for epoch diagnostics and the test split is not loaded. Open **Training monitor** in the existing React app to watch status, loss curves, runtime, GPU memory, and checkpoints. Runs are stored under ignored `runs/<run-id>/`. To resume the latest saved update:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.train --resume runs/<run-id>/checkpoints/latest.pt
+```
+
 ## Dataset inspection
 
 The first data milestone uses the pinned Hugging Face EuroSAT RGB revision. To download/reuse its local cache and regenerate the inspection report and preview:

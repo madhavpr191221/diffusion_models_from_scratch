@@ -4,7 +4,7 @@ This is the learner-facing record of what the project has implemented and what t
 
 ## Current status
 
-Stages 0, 1, 2, 2.5, and 3 are implemented. The project has a dataset adapter, both mathematical forms of the forward diffusion process, and an untrained timestep-conditioned U-Net. **There is no trained checkpoint, reverse sampler, or generated model image yet.** The Stage 2.5 UI explores noise added to real images; it does not generate new images.
+Stages 0, 1, 2, 2.5, 3, and 4 are implemented. The 64-image pilot and five-epoch baseline have completed on CUDA. **There is now a trained baseline checkpoint, but there is not yet a reverse sampler or generated model image.** The forward viewer explores noise added to real images; it does not generate new images.
 
 ## Stage 0 — Project foundation
 
@@ -99,6 +99,55 @@ The model predicts the Gaussian noise used to form a noisy input, but it has not
 
 A CPU smoke check used a synthetic batch of two images and timesteps `[0,999]`. The embedding was finite with shape `[2,128]`; the model returned finite predictions shaped `[2,3,64,64]`. The encoder path was `[2,32,64,64]`, `[2,64,32,32]`, `[2,128,16,16]`, `[2,128,8,8]`; decoder concatenations were `[2,256,16,16]`, `[2,128,32,32]`, and `[2,64,64,64]`. The model contains 2,309,539 parameters. No loss, optimizer, or training step was run.
 
+## Stage 4 — Noise prediction and the training monitor
+
+The network learns to predict the exact Gaussian noise used to create a noisy training image. For each update, the trainer samples a training image $x_0$, a timestep $t$, and noise $\epsilon$, then constructs
+
+$$
+x_t = \sqrt{\bar{\alpha}_t}x_0 + \sqrt{1-\bar{\alpha}_t}\epsilon.
+$$
+
+The optimizer minimizes the mean squared error
+
+$$
+L = \operatorname{mean}\left[(\epsilon-\epsilon_\theta(x_t,t))^2\right].
+$$
+
+This objective is unconditional: class labels are omitted. The CLI loads the `train` split for optimization and `validation` for diagnostics. The training workflow only accepts those split names and does not load the reserved test split. Validation uses the full 5,400-image split with fixed noise/timesteps across epochs, making epoch-to-epoch loss comparisons less affected by new validation randomness.
+
+Start with the 64-image / 200-update pilot, then launch the five-epoch baseline:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.train --pilot
+uv run --locked python -m ddpm_eurosat.train
+```
+
+Runs are saved beneath `runs/<run-id>/`. The React app's **Training monitor** view polls run status and metrics while the CLI runs. It displays per-update loss, a 100-update moving average, validation loss by epoch, progress, device, runtime, throughput, GPU memory, and checkpoint metadata. Use the existing API and Vite commands in Stage 2.5 to open the app.
+
+The raw training loss varies from batch to batch because each update sees new images, timesteps, and noise. Its moving average helps show the broad optimization trend. Validation loss is a diagnostic on held-out validation images. A lower loss says the model is better at predicting the sampled noise under this objective; it does not by itself establish that generated images look realistic.
+
+Each run includes `config.json`, `status.json`, append-only `metrics.jsonl`, `checkpoint_manifest.json`, and a `checkpoints/` folder. Progress snapshots are saved around 25%, 50%, 75%, and 100% of planned updates, with `best-val.pt` and a replaceable resumable `latest.pt`. Resume from the latest checkpoint with:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.train --resume runs/<run-id>/checkpoints/latest.pt
+```
+
+### Run evidence
+
+The pilot completed 200 updates in about 13 seconds (about 15.4 updates/second) with roughly 257 MB peak allocated CUDA memory. Its per-update loss moved from 1.20 at the first update to 0.068 at the last update while repeatedly using the fixed 64-image subset. This checks that the optimization path can learn on a small repeated sample; it is not a measure of generalization.
+
+The baseline used all 16,200 training images for five epochs, batch size 8, AdamW at `0.0002`, and seed 42. It completed 10,125 updates in about 31.9 minutes, with about 5.29 updates/second and 257 MB peak allocated CUDA memory. Each epoch evaluated all 5,400 validation images using the same validation noise/timesteps:
+
+| Epoch | Train MSE | Validation MSE |
+|---:|---:|---:|
+| 1 | 0.06229 | 0.02512 |
+| 2 | 0.02382 | 0.02077 |
+| 3 | 0.01993 | 0.01845 |
+| 4 | 0.01777 | 0.01714 |
+| 5 | 0.01785 | 0.01663 |
+
+The final validation MSE is the best observed value, saved in `best-val.pt`. Artifacts are under `runs/20261011-061727-train-seed-42/`; the run contains the 25%, 50%, 75%, and 100% snapshots, `best-val.pt`, and `latest.pt`. The training workflow loaded the train split and validation split by name and has no path that loads the test split. The React production build succeeded, and the user-provided browser screenshots confirm the completed-run monitor and checkpoint metadata display. An explicit resume smoke check remains before Stage 5 is considered complete. The loss trend is an optimization diagnostic, not evidence about generated-image realism.
+
 ## Next stages
 
-Stage 4 connects this model to the noise-prediction objective and begins with a tiny overfit/debug run before choosing a baseline training budget. Only after training can Stage 5 use the learned reverse process to generate new images. The current viewer demonstrates the **forward** process on existing data, not learned generation.
+The Stage 4 trainer, baseline, and monitor implementation are complete; an explicit resume smoke check remains. Stage 5 will implement the learned reverse process and generate new images from `best-val.pt`. The current viewer demonstrates the **forward** process on existing data, not learned generation.

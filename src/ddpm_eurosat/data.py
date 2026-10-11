@@ -1,6 +1,7 @@
 """EuroSAT RGB loading and the image-only tensor contract."""
 
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -21,6 +22,26 @@ def load_eurosat_rgb(cache_dir: str | Path = "data/huggingface") -> DatasetDict:
     cache_path.mkdir(parents=True, exist_ok=True)
     return load_dataset(
         DATASET_ID,
+        revision=DATASET_REVISION,
+        cache_dir=str(cache_path),
+    )
+
+
+def load_eurosat_split(
+    split_name: Literal["train", "validation"],
+    cache_dir: str | Path = "data/huggingface",
+) -> Dataset:
+    """Load only the requested model-eligible split.
+
+    The training workflow deliberately cannot request the held-out test split.
+    """
+    if split_name not in ("train", "validation"):
+        raise ValueError("Only the train and validation splits may be loaded by model workflows")
+    cache_path = Path(cache_dir)
+    cache_path.mkdir(parents=True, exist_ok=True)
+    return load_dataset(
+        DATASET_ID,
+        split=split_name,
         revision=DATASET_REVISION,
         cache_dir=str(cache_path),
     )

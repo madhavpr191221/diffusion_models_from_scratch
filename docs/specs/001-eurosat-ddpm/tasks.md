@@ -47,9 +47,15 @@ Stage 3 evidence: A CPU forward pass with batch size 2 and timesteps `[0,999]` r
 
 ## Stage 4 — Training
 
-- [ ] Implement simple noise-prediction training, metrics, and checkpoint format.
-- [ ] Run tiny-subset debug/overfit experiment and measure runtime/memory.
-- [ ] Set the baseline budget from pilot measurements and run it.
+- [x] Implement a CLI noise-prediction trainer that loads only the train split for updates and the validation split for diagnostics; do not load the test split.
+- [x] Add a fixed 64-image / 200-update GPU pilot, per-update JSONL metrics, run status, atomic resumable checkpoints, milestone snapshots, and best-validation checkpoint tracking.
+- [x] Add read-only run, metric, and checkpoint API routes and a Training Monitor view in the existing React app.
+- [x] Document run commands, artifact structure, loss interpretation, and the held-out test boundary.
+- [x] Run the CUDA pilot: 200 updates completed with finite, falling loss and peak allocated CUDA memory recorded.
+- [x] Run the five-epoch baseline: all 10,125 updates and all five full validation passes completed; final train/validation MSE was 0.01785 / 0.01663.
+- [x] Save four progress snapshots, best-validation and latest checkpoints under the ignored run directory; document actual runtime, metrics, and checkpoint paths.
+- [x] Review the completed-run React monitor and checkpoint metadata in the user-provided browser screenshots.
+- [ ] Explicitly smoke-check checkpoint resumption before Stage 5 is considered complete.
 
 ## Stage 5 — Sampling
 

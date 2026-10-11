@@ -21,7 +21,7 @@ scripts/
 web/                         # React + TypeScript + Vite
 configs/base.toml
 data/                         # downloaded, ignored
-runs/<run-id>/                # metrics, config, checkpoints, figures; ignored
+runs/<run-id>/                # status, config, JSONL metrics, checkpoints; ignored
 ```
 
 Only files needed by the current milestone should be added. This layout is the target, not a request to create empty placeholders for every future module.
@@ -56,8 +56,10 @@ For batch size `B`, the encoder skips are `[B,32,64,64]`, `[B,64,32,32]`, and `[
 
 ## Run artifact contract
 
-Each `runs/<run-id>/` contains a resolved configuration, seed and environment summary, epoch-level train/validation noise MSE, elapsed time, peak GPU memory when available, loadable checkpoint(s), and sample/trajectory images. A decreasing noise MSE is a training diagnostic; it is not by itself evidence of good generated imagery.
+Each `runs/<run-id>/` contains `config.json`, atomically replaced `status.json`, append-only `metrics.jsonl`, `checkpoint_manifest.json`, and `checkpoints/`. Training records per-update noise MSE and epoch-level validation noise MSE with fixed validation noise/timesteps. The four progress snapshots, `best-val.pt`, and replaceable `latest.pt` contain model/optimizer state, epoch/batch/update position, resolved configuration, and Python/NumPy/PyTorch RNG states. Checkpoints are written through a temporary file followed by atomic replacement. A decreasing noise MSE is a training diagnostic; it is not by itself evidence of good generated imagery.
+
+The training command loads the pinned `train` split directly and the `validation` split only for diagnostics. The `load_eurosat_split` training interface cannot request `test`, preventing the training workflow from loading test images.
 
 ## Local UI boundary
 
-React/TypeScript/Vite is a separate frontend. Stage 2.5 adds an early forward-noise viewer before the model exists; Stage 6 extends the same frontend and FastAPI service with dataset summaries, run artifacts, and checkpoint generation. The service binds to localhost. The UI does not start or control training in v1. During Stage 2.5, expose paginated validation image previews, create one active seeded trace at a time, and return frames with timestep and cumulative-alpha metadata. A new trace replaces the cached trace; a frame request for a replaced trace returns not found. Serve the built frontend from the local service; during development use the frontend dev server with an API proxy.
+React/TypeScript/Vite is the only UI. The Stage 2.5 forward-noise view remains available and a Stage 4 Training Monitor polls the local FastAPI service for run summaries, status, incremental metrics, and checkpoint metadata. The CLI starts and controls training; UI endpoints are read-only. During Stage 2.5, expose paginated validation image previews, create one active seeded trace at a time, and return frames with timestep and cumulative-alpha metadata. A new trace replaces the cached trace; a frame request for a replaced trace returns not found. Serve the built frontend from the local service; during development use the frontend dev server with an API proxy.

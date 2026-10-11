@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import TrainingMonitor from './TrainingMonitor'
 import './App.css'
 
 type ImageItem = { index: number; url: string }
@@ -19,6 +20,7 @@ async function responseError(response: Response): Promise<string> {
 }
 
 function App() {
+  const [view, setView] = useState<'forward' | 'training'>('forward')
   const [pageOffset, setPageOffset] = useState(0)
   const [page, setPage] = useState<ImagePage | null>(null)
   const [selectedImage, setSelectedImage] = useState<ImageItem | null>(null)
@@ -157,11 +159,17 @@ function App() {
           <span>FIELDNOTES <b>/ DDPM</b></span>
         </a>
         <div className="topbar-right">
-          <span className="status-pill"><span className="status-dot" /> FORWARD PROCESS · MODEL NOT TRAINED</span>
+          <span className="status-pill"><span className="status-dot" /> {view === 'forward' ? 'FORWARD PROCESS · NO TRAINED MODEL REQUIRED' : 'LOCAL TRAINING MONITOR'}</span>
           <a className="log-link" href="/api/learning-log" target="_blank" rel="noreferrer">Learning log ↗</a>
         </div>
       </header>
 
+      <nav className="view-tabs" aria-label="Project views">
+        <button className={view === 'forward' ? 'active' : ''} onClick={() => setView('forward')}>Forward process</button>
+        <button className={view === 'training' ? 'active' : ''} onClick={() => setView('training')}>Training monitor</button>
+      </nav>
+
+      {view === 'training' ? <TrainingMonitor /> : <>
       <section className="intro" id="top">
         <div className="eyebrow">AN INTERACTIVE DDPM NOTEBOOK · STAGE 2.5</div>
         <h1>Watch an image <em>become noise.</em></h1>
@@ -292,6 +300,7 @@ function App() {
         <a href="/api/learning-log" target="_blank" rel="noreferrer">Read what we’ve built so far ↗</a>
         <span>NO TRAINED MODEL YET</span>
       </footer>
+      </>}
     </main>
   )
 }

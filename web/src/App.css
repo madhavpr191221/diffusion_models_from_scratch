@@ -83,6 +83,63 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .page-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 24px 0 30px; color: var(--faint); font: 8px var(--mono); letter-spacing: .08em; }
 .page-footer a { font: 10px 'Segoe UI', system-ui, sans-serif; letter-spacing: 0; }
 
+.view-tabs { display: flex; gap: 8px; padding: 14px 0 0; }
+.view-tabs button { padding: 8px 12px; color: var(--muted); background: transparent; border: 1px solid var(--border); border-radius: 3px; font-size: 11px; cursor: pointer; }
+.view-tabs button.active { color: var(--green); background: #20291e; border-color: #596d45; }
+.training-view { padding: 36px 0 52px; }
+.monitor-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+.monitor-heading h1 { margin: 12px 0 8px; color: var(--text); font: 500 clamp(32px, 4vw, 48px)/1.1 var(--serif); }
+.monitor-heading h1 em { color: var(--green); }
+.monitor-heading p { max-width: 640px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.run-picker { display: flex; flex-direction: column; gap: 7px; min-width: min(360px, 45vw); color: var(--muted); font-size: 11px; }
+.run-picker select { padding: 10px; color: var(--text); background: #141a16; border: 1px solid var(--border); border-radius: 3px; font: 11px var(--mono); }
+.monitor-empty { padding: 28px; }
+.monitor-empty h2 { margin: 0 0 10px; font: 500 22px var(--serif); }
+.monitor-empty p { margin: 16px 0 7px; color: var(--muted); font-size: 12px; }
+.monitor-empty code, .checkpoint-path code { display: inline-block; padding: 8px 10px; color: var(--green); background: #111512; border: 1px solid var(--border); border-radius: 3px; font: 11px var(--mono); }
+.run-summary, .chart-panel, .checkpoint-panel { padding: 20px; margin-bottom: 14px; }
+.run-state-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.run-state-line > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.run-state-line h2 { overflow: hidden; margin: 0; color: var(--text); font: 500 16px var(--mono); text-overflow: ellipsis; }
+.state-badge { padding: 5px 9px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; font: 9px var(--mono); text-transform: uppercase; }
+.state-running { color: var(--green); border-color: #596d45; background: #20291e; }
+.state-completed { color: #a9d5c3; border-color: #39564c; background: #19251f; }
+.state-failed, .state-interrupted { color: #ffc7ad; border-color: #754833; background: #34231d; }
+.progress-meta { display: flex; justify-content: space-between; gap: 10px; margin: 20px 0 8px; color: var(--muted); font: 10px var(--mono); }
+.progress-track { height: 8px; overflow: hidden; background: #101411; border: 1px solid var(--border); border-radius: 5px; }
+.progress-track span { display: block; height: 100%; background: var(--green); transition: width .25s ease; }
+.run-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
+.run-stats > div { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.run-stats small { color: var(--faint); font: 8px var(--mono); letter-spacing: .08em; }
+.run-stats b { overflow: hidden; color: var(--text); font: 12px var(--mono); text-overflow: ellipsis; }
+.resolved-config { display: flex; flex-wrap: wrap; gap: 8px 17px; margin-top: 15px; padding-top: 13px; border-top: 1px solid var(--border); color: var(--faint); font: 8px var(--mono); letter-spacing: .06em; }
+.resolved-config b { margin-left: 4px; color: var(--muted); font-size: 9px; font-weight: 400; letter-spacing: 0; }
+.chart-panel .panel-copy { max-width: 800px; line-height: 1.55; }
+.loss-chart-wrap { position: relative; padding: 8px 0 0; }
+.loss-chart { display: block; width: 100%; height: auto; overflow: visible; }
+.chart-axis { stroke: var(--border); stroke-width: 1; }
+.chart-label { fill: var(--faint); font: 10px var(--mono); }
+.chart-raw { fill: none; stroke: #728174; stroke-width: 1; opacity: .35; }
+.chart-smooth { fill: none; stroke: var(--green); stroke-width: 2.4; stroke-linejoin: round; stroke-linecap: round; }
+.chart-validation { fill: var(--orange); stroke: var(--panel); stroke-width: 2; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); font-size: 10px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 7px; }
+.chart-legend i { display: inline-block; width: 13px; height: 3px; background: var(--green); }
+.chart-legend .legend-raw { background: #728174; opacity: .7; }
+.chart-legend .legend-validation { width: 8px; height: 8px; border-radius: 50%; background: var(--orange); }
+.chart-range { display: flex; justify-content: space-between; margin: 7px 0 0 58px; color: var(--faint); font: 8px var(--mono); }
+.chart-empty { padding: 30px 12px; color: var(--faint); text-align: center; font: 10px var(--mono); }
+.learning-note { margin-top: 16px; padding: 12px 13px; color: var(--muted); background: #141a16; border-left: 2px solid var(--green); font-size: 11px; line-height: 1.5; }
+.learning-note b { color: var(--text); }
+.checkpoint-list { margin-top: 14px; }
+.checkpoint-row { display: grid; grid-template-columns: minmax(190px, 1.5fr) minmax(120px, .7fr) minmax(80px, .4fr); align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border); color: var(--muted); font: 10px var(--mono); }
+.checkpoint-row > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.checkpoint-row b { overflow: hidden; color: var(--text); font-weight: 500; text-overflow: ellipsis; }
+.checkpoint-row small { color: var(--faint); font-size: 9px; }
+.checkpoint-row > span:last-child { text-align: right; }
+.checkpoint-path { margin-top: 14px; }
+.checkpoint-path code { padding: 2px 4px; font-size: 9px; }
+
 @media (min-width: 920px) {
   .trace-panel { grid-column: 3; grid-row: 1 / span 2; }
   .image-display { min-height: 180px; }
@@ -106,4 +163,10 @@ button:disabled { opacity: .4; cursor: not-allowed; }
   .image-stage { gap: 7px; }
   .image-display { min-height: 145px; }
   .page-footer { flex-wrap: wrap; }
+  .monitor-heading { align-items: stretch; flex-direction: column; }
+  .run-picker { min-width: 0; }
+  .run-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .checkpoint-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .checkpoint-row > span:last-child { display: none; }
+  .chart-legend { gap: 9px; }
 }

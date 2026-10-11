@@ -30,6 +30,9 @@ Train a small model to predict Gaussian noise for normalized EuroSAT RGB images 
 - Provide a local React/TypeScript UI for dataset inspection, run/metric/checkpoint viewing, forward-noising visualization, and generation from a saved checkpoint. Training remains a CLI workflow in v1.
 - Before training, provide an interactive forward-noise viewer where the user selects an unlabeled validation image and compares direct marginal samples with a seeded stepwise Markov path.
 - Maintain a learner-facing log of completed stages, equations, commands, artifacts, and current model/training status.
+- Record per-update training noise MSE and per-epoch validation MSE with fixed validation timesteps/noise; expose run status, metrics, and checkpoint metadata to the existing React application.
+- Train from the CLI only. The React application is a read-only monitor and does not launch or control training; no separate TensorBoard UI or tracking service is added.
+- Make resumable checkpoints atomic and include model, optimizer, progress, configuration, and random-number-generator state. Save progress snapshots, `best-val.pt`, and a replaceable `latest.pt`.
 
 ## Acceptance criteria
 
@@ -43,6 +46,8 @@ Train a small model to predict Gaussian noise for normalized EuroSAT RGB images 
 - A saved checkpoint can be loaded for a complete sampling loop; generated tensors and figures are saved.
 - The UI loads real dataset/run artifacts and can request and display generation locally.
 - Before any model is trained, the viewer can select validation images, create repeatable traces in both forward-process modes, scrub/play frames, and display the correct timestep and cumulative-alpha metadata.
+- A 64-image / 200-update pilot records loss, runtime, and peak GPU memory where available; the five-epoch baseline uses only train and validation splits, with the test split not loaded.
+- While the CLI trainer runs, the React training monitor shows run state/progress, per-update training loss and moving average, per-epoch validation loss, runtime/device information, and available checkpoints.
 - The learning log accurately describes completed work and clearly distinguishes implemented forward diffusion from the future trained model and reverse-generation work.
 
 ## Constraints and exclusions
