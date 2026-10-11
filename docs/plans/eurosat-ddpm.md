@@ -61,9 +61,9 @@ The CLI owns training. The existing local React application adds a Training Moni
 
 ## Stage 5 — Reverse sampling and generated evidence
 
-Starting from Gaussian `x_T`, implement the epsilon-parameterized reverse mean and posterior variance `beta_tilde = beta_t * (1-alpha_bar_(t-1))/(1-alpha_bar_t)`. Add sampled Gaussian noise at steps above the final step; use no fresh noise at the final update. Do not substitute DDIM or another sampler.
+Starting from Gaussian `x_T`, implement the epsilon-parameterized reverse mean and posterior variance `beta_tilde = beta_t * (1-alpha_bar_(t-1))/(1-alpha_bar_t)`. Add sampled Gaussian noise at steps above the final step; use no fresh noise at the final update. Do not substitute DDIM or another sampler. Use the complete configured 1,000-step chain; do not re-space or reduce the sampler for generated artifacts.
 
-Verify one reverse step and a complete smoke loop using a reduced timestep count for speed. Then generate a small batch from the trained checkpoint using the planned full schedule. Save a generated grid and reverse trajectory; inspect the result. Report an empirical Gaussian variance sanity check. Interpret loss as noise-prediction evidence only, and describe image quality from the saved samples rather than inferring it from loss.
+Verify one reverse update with supplied noise and confirm the index-0 update ignores noise. Smoke-run one complete sample, then generate eight seeded samples from the trained checkpoint. Save raw tensors, a display grid, one complete reverse trajectory, a trajectory contact sheet, and metadata under the run directory. Inspect outputs and describe observed quality separately from the training loss. The test split remains unused.
 
 ## Stage 6 — Extend the React/TypeScript local UI
 

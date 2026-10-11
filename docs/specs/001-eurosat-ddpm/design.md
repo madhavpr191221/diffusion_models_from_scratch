@@ -29,7 +29,7 @@ Only files needed by the current milestone should be added. This layout is the t
 ## Python boundaries
 
 - `data.py`: explicit dataset download/loading, transforms, and batch contract.
-- `diffusion.py`: schedule buffers, timestep coefficient extraction, independent timestep sampling, direct marginal noising, stepwise forward transitions/trajectory, and (in a later stage) reverse update math.
+- `diffusion.py`: schedule buffers, timestep coefficient extraction, independent timestep sampling, direct marginal noising, stepwise forward transitions/trajectory, and the ancestral posterior reverse update.
 - `model.py`: timestep embedding, residual blocks, and U-Net only.
 - `train.py`: batch-to-loss step, optimizer loop, metrics, and checkpoint writing.
 - `sampling.py`: checkpoint loading and ancestral sampling, with optional intermediate states.
@@ -63,3 +63,9 @@ The training command loads the pinned `train` split directly and the `validation
 ## Local UI boundary
 
 React/TypeScript/Vite is the only UI. The Stage 2.5 forward-noise view remains available and a Stage 4 Training Monitor polls the local FastAPI service for run summaries, status, incremental metrics, and checkpoint metadata. The CLI starts and controls training; UI endpoints are read-only. During Stage 2.5, expose paginated validation image previews, create one active seeded trace at a time, and return frames with timestep and cumulative-alpha metadata. A new trace replaces the cached trace; a frame request for a replaced trace returns not found. Serve the built frontend from the local service; during development use the frontend dev server with an API proxy.
+
+## Stage 5 reverse sampling
+
+`ddpm_reverse_step` implements the epsilon-prediction posterior update using zero-based schedule index `i`. For `i > 0`, it adds Gaussian noise scaled by `sqrt(beta_tilde_i)`, where `beta_tilde_i = beta_i * (1 - alpha_bar_(i-1)) / (1 - alpha_bar_i)`. At index 0, `alpha_bar_previous = 1` and no random noise is added. `sampling.py` loads a compatible checkpoint, uses the full configured schedule and a device-local seeded generator, and stores raw tensors without clipping. PNG conversion alone clips to `[-1,1]`.
+
+The CLI writes `samples.pt`, `samples.png`, `trajectory.pt`, `trajectory.png`, and `metadata.json` under `runs/<run-id>/generation/seed-<seed>/`. The trajectory contains `x_T` followed by each reverse state through `x_0`, for `T+1` frames. One selected sample is retained to bound storage. Generation starts only from Gaussian noise and does not read any dataset split.

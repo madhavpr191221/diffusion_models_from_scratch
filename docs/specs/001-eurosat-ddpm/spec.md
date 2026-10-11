@@ -44,6 +44,7 @@ Train a small model to predict Gaussian noise for normalized EuroSAT RGB images 
 - The U-Net returns finite predictions with the required shape.
 - A tiny debug/overfit run completes before the baseline budget is chosen.
 - A saved checkpoint can be loaded for a complete sampling loop; generated tensors and figures are saved.
+- Ancestral sampling uses the full configured 1,000-step schedule, posterior variance, a reproducible seed, and no added noise in the final update; one complete reverse trajectory and a small sample batch are saved.
 - The UI loads real dataset/run artifacts and can request and display generation locally.
 - Before any model is trained, the viewer can select validation images, create repeatable traces in both forward-process modes, scrub/play frames, and display the correct timestep and cumulative-alpha metadata.
 - A 64-image / 200-update pilot records loss, runtime, and peak GPU memory where available; the five-epoch baseline uses only train and validation splits, with the test split not loaded.

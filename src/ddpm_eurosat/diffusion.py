@@ -107,6 +107,48 @@ def q_sample(
     return signal * x0 + noise_scale * noise, noise
 
 
+def ddpm_reverse_step(
+    schedule: DiffusionSchedule,
+    x_t: Tensor,
+    predicted_noise: Tensor,
+    timestep: int,
+    *,
+    noise: Tensor | None = None,
+) -> Tensor:
+    """Apply one ancestral DDPM update using the posterior variance.
+
+    ``timestep`` is a zero-based schedule index. The final update (index 0)
+    is deterministic; no random noise is added. Supply ``noise`` to make a
+    stochastic update exactly reproducible in a focused equation check.
+    """
+    if not 0 <= timestep < schedule.timesteps:
+        raise IndexError(f"timestep must be in [0, {schedule.timesteps - 1}]")
+    if x_t.ndim != 4 or not x_t.is_floating_point():
+        raise ValueError("x_t must be a floating [B,C,H,W] tensor")
+    if predicted_noise.shape != x_t.shape or predicted_noise.device != x_t.device:
+        raise ValueError("predicted_noise must match x_t shape and device")
+    if schedule.betas.device != x_t.device:
+        raise ValueError("Move the schedule and image tensors to the same device")
+
+    beta = schedule.betas[timestep]
+    alpha = schedule.alphas[timestep]
+    alpha_bar = schedule.alpha_bars[timestep]
+    alpha_bar_previous = (
+        schedule.alpha_bars[timestep - 1]
+        if timestep > 0
+        else torch.ones((), device=x_t.device, dtype=x_t.dtype)
+    )
+    posterior_variance = beta * (1.0 - alpha_bar_previous) / (1.0 - alpha_bar)
+    mean = (x_t - beta * predicted_noise / torch.sqrt(1.0 - alpha_bar)) / torch.sqrt(alpha)
+    if timestep == 0:
+        return mean
+    if noise is None:
+        noise = torch.randn_like(x_t)
+    elif noise.shape != x_t.shape or noise.device != x_t.device or noise.dtype != x_t.dtype:
+        raise ValueError("noise must match x_t shape, device, and dtype")
+    return mean + torch.sqrt(posterior_variance) * noise
+
+
 @torch.no_grad()
 def q_sample_markov(
     schedule: DiffusionSchedule,

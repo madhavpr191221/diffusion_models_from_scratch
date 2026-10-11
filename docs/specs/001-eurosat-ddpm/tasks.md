@@ -55,13 +55,16 @@ Stage 3 evidence: A CPU forward pass with batch size 2 and timesteps `[0,999]` r
 - [x] Run the five-epoch baseline: all 10,125 updates and all five full validation passes completed; final train/validation MSE was 0.01785 / 0.01663.
 - [x] Save four progress snapshots, best-validation and latest checkpoints under the ignored run directory; document actual runtime, metrics, and checkpoint paths.
 - [x] Review the completed-run React monitor and checkpoint metadata in the user-provided browser screenshots.
-- [ ] Explicitly smoke-check checkpoint resumption before Stage 5 is considered complete.
+- [ ] Explicitly smoke-check checkpoint resumption as a Stage 4 follow-up.
 
 ## Stage 5 — Sampling
 
-- [ ] Implement documented ancestral posterior-variance update.
-- [ ] Check one reverse update and a reduced smoke sampling loop.
-- [ ] Generate and inspect samples and reverse trajectory from a saved checkpoint.
+- [x] Implement the epsilon-parameterized ancestral update with posterior variance and no added noise at index 0.
+- [x] Verify the reverse equation with supplied noise and verify index 0 is independent of supplied noise.
+- [x] Run a full 1,000-step single-image sampling smoke run from `best-val.pt`.
+- [x] Generate eight seeded samples and retain all 1,001 states for sample 0.
+- [x] Save and inspect raw tensors, sample grid, trajectory contact sheet, and generation metadata.
+- [x] Record the sample-quality limitation; loss does not establish visual quality.
 
 ## Stage 6 — Local dashboard
 

@@ -4,7 +4,7 @@ This is the learner-facing record of what the project has implemented and what t
 
 ## Current status
 
-Stages 0, 1, 2, 2.5, 3, and 4 are implemented. The 64-image pilot and five-epoch baseline have completed on CUDA. **There is now a trained baseline checkpoint, but there is not yet a reverse sampler or generated model image.** The forward viewer explores noise added to real images; it does not generate new images.
+Stages 0, 1, 2, 2.5, 3, 4, and 5 are implemented. The 64-image pilot and five-epoch baseline completed on CUDA, and the saved checkpoint now produces unconditional samples through the full ancestral reverse chain. The forward viewer still explores noise added to real images; reverse sampling starts from Gaussian noise.
 
 ## Stage 0 — Project foundation
 
@@ -146,8 +146,30 @@ The baseline used all 16,200 training images for five epochs, batch size 8, Adam
 | 4 | 0.01777 | 0.01714 |
 | 5 | 0.01785 | 0.01663 |
 
-The final validation MSE is the best observed value, saved in `best-val.pt`. Artifacts are under `runs/20261011-061727-train-seed-42/`; the run contains the 25%, 50%, 75%, and 100% snapshots, `best-val.pt`, and `latest.pt`. The training workflow loaded the train split and validation split by name and has no path that loads the test split. The React production build succeeded, and the user-provided browser screenshots confirm the completed-run monitor and checkpoint metadata display. An explicit resume smoke check remains before Stage 5 is considered complete. The loss trend is an optimization diagnostic, not evidence about generated-image realism.
+The final validation MSE is the best observed value, saved in `best-val.pt`. Artifacts are under `runs/20261011-061727-train-seed-42/`; the run contains the 25%, 50%, 75%, and 100% snapshots, `best-val.pt`, and `latest.pt`. The training workflow loaded the train split and validation split by name and has no path that loads the test split. The React production build succeeded, and the user-provided browser screenshots confirm the completed-run monitor and checkpoint metadata display. An explicit resume smoke check remains as a Stage 4 follow-up. The loss trend is an optimization diagnostic, not evidence about generated-image realism.
+
+## Stage 5 — Ancestral reverse sampling
+
+At reverse index $i$, the model predicts the noise in $x_i$. The sampler computes
+
+$$
+\mu_\theta(x_i,i)=\frac{1}{\sqrt{\alpha_i}}\left(x_i-\frac{\beta_i}{\sqrt{1-\bar\alpha_i}}\epsilon_\theta(x_i,i)\right),
+\qquad
+\tilde\beta_i=\beta_i\frac{1-\bar\alpha_{i-1}}{1-\bar\alpha_i}.
+$$
+
+It draws $x_{i-1}=\mu_\theta+\sqrt{\tilde\beta_i}z$ for indices above zero. At index zero, it returns the mean without adding fresh noise. The implementation uses the full 1,000-step configured schedule. A supplied-noise equation check matched the posterior update, and two deliberately different supplied noises produced the same final update.
+
+Generate eight unconditional images and keep the entire path for sample 0:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.sampling --checkpoint runs/20261011-061727-train-seed-42/checkpoints/best-val.pt --num-samples 8 --seed 42 --trajectory-index 0
+```
+
+Artifacts are in `runs/20261011-061727-train-seed-42/generation/seed-42/`: `samples.pt` has shape `[8,3,64,64]`; `trajectory.pt` has shape `[1001,3,64,64]` and is ordered from $x_T$ to $x_0$; PNG previews show the eight samples and nine evenly spaced trajectory frames; `metadata.json` records the checkpoint, schedule, seed, device, and value range. Raw tensors remain unclipped; only PNG previews clip to `[-1,1]`.
+
+The eight-image run completed in 4.3 seconds on CUDA. The saved tensors are finite and the raw sample range was approximately `[-3.67, 6.00]`. Visual inspection shows the current samples are highly saturated and noisy, with little recognizable land-cover structure. The implementation and training loss are evidence that the reverse calculation runs, not evidence that this five-epoch model has learned useful image generation. The test split was not accessed.
 
 ## Next stages
 
-The Stage 4 trainer, baseline, and monitor implementation are complete; an explicit resume smoke check remains. Stage 5 will implement the learned reverse process and generate new images from `best-val.pt`. The current viewer demonstrates the **forward** process on existing data, not learned generation.
+Stage 5 reverse sampling is complete. The Stage 4 checkpoint-resume smoke check remains a follow-up. Stage 6 can expose generated samples and trajectories through the existing React application and local API; no separate UI is planned.
