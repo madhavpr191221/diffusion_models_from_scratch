@@ -1,0 +1,33 @@
+# Initial educational baseline. Confirm batch size and epoch count after the
+# tiny-subset pilot measures runtime and GPU memory.
+seed = 42
+image_size = 64
+image_channels = 3
+normalization_min = -1.0
+normalization_max = 1.0
+
+[dataset]
+repository = "blanchon/EuroSAT_RGB"
+revision = "655ef66ef2be07f89aec61407f24c772802eb87d"
+cache_dir = "data/huggingface"
+train_split = "train"
+validation_split = "validation"
+test_split = "test"
+
+[diffusion]
+timesteps = 1000
+beta_start = 0.0001
+beta_end = 0.02
+reverse_variance = "posterior"
+
+[model]
+base_channels = 32
+channel_multipliers = [1, 2, 4]
+timestep_embedding_dim = 128
+attention = false
+
+[training]
+batch_size = 8
+epochs = 5
+learning_rate = 0.0002
+optimizer = "adamw"

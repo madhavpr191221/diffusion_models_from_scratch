@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Downloaded data and generated experiment artifacts
+data/
+runs/
+outputs/
+*.pt
+*.pth
+
+# Frontend dependencies and build output
+web/node_modules/
+web/dist/
+
+# Local environment files
+.env
+.env.*
+!.env.example
