@@ -37,9 +37,13 @@ Stage 2.5 implementation evidence: `npm run build --prefix web` succeeded. The l
 
 ## Stage 3 — Timestep representation and U-Net
 
-- [ ] Implement sinusoidal embedding and learned transform.
-- [ ] Implement small conditioned U-Net and matching-resolution skips.
-- [ ] Record representative tensor shapes and check finite output shape.
+- [x] Specify the model input/output contract, zero-based timestep indexing, embedding frequencies, residual-block conditioning, and encoder/decoder shape map.
+- [x] Implement cosine-then-sine timestep embedding with the learned 128 -> 512 -> 128 transform.
+- [x] Implement timestep-conditioned residual blocks and the 32/64/128-channel U-Net with an 8x8 bottleneck and matching skip concatenations.
+- [x] Run a CPU synthetic-batch smoke check for embedding shape, intermediate feature shapes, finite predictions, and output shape.
+- [x] Record the observed tensor shapes and parameter count before review.
+
+Stage 3 evidence: A CPU forward pass with batch size 2 and timesteps `[0,999]` returned finite predictions shaped `[2,3,64,64]`; the time embedding was finite with shape `[2,128]`. Encoder feature maps were `[2,32,64,64]`, `[2,64,32,32]`, `[2,128,16,16]`, then `[2,128,8,8]`. Decoder concatenations were `[2,256,16,16]`, `[2,128,32,32]`, and `[2,64,64,64]`, matching the saved skips. The model has 2,309,539 parameters. No training or optimizer steps were run.
 
 ## Stage 4 — Training
 

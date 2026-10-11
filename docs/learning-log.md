@@ -1,10 +1,10 @@
 # DDPM Learning Log
 
-This is the learner-facing record of what the project has implemented and what the evidence shows. It is intentionally separate from the normative specification and implementation plan. Last updated 2026-10-10.
+This is the learner-facing record of what the project has implemented and what the evidence shows. It is intentionally separate from the normative specification and implementation plan. Last updated 2026-10-11.
 
 ## Current status
 
-Stages 0, 1, 2, and 2.5 are implemented. The project has a dataset adapter and both mathematical forms of the forward diffusion process. **There is no neural network, trained checkpoint, reverse sampler, or generated model image yet.** The Stage 2.5 UI explores noise added to real images; it does not generate new images.
+Stages 0, 1, 2, 2.5, and 3 are implemented. The project has a dataset adapter, both mathematical forms of the forward diffusion process, and an untrained timestep-conditioned U-Net. **There is no trained checkpoint, reverse sampler, or generated model image yet.** The Stage 2.5 UI explores noise added to real images; it does not generate new images.
 
 ## Stage 0 — Project foundation
 
@@ -93,6 +93,12 @@ npm run build --prefix web
 
 The API also serves this log at `/api/learning-log`. It caches only the most recently created trace in memory; creating a new trace replaces the old one. A 1,000-frame float32 trajectory for one RGB 64 × 64 image uses about 47 MiB after construction.
 
+## Stage 3 — Timestep embedding and U-Net
+
+The model predicts the Gaussian noise used to form a noisy input, but it has not been trained. Its only conditioning input is the diffusion timestep; EuroSAT class labels are not used. The timestep embedding has 128 cosine-then-sine features followed by a learned `128 -> 512 -> 128` transform. A small U-Net uses GroupNorm, SiLU, and matching-resolution skip connections, with feature widths 32, 64, and 128 and an 8x8 bottleneck.
+
+A CPU smoke check used a synthetic batch of two images and timesteps `[0,999]`. The embedding was finite with shape `[2,128]`; the model returned finite predictions shaped `[2,3,64,64]`. The encoder path was `[2,32,64,64]`, `[2,64,32,32]`, `[2,128,16,16]`, `[2,128,8,8]`; decoder concatenations were `[2,256,16,16]`, `[2,128,32,32]`, and `[2,64,64,64]`. The model contains 2,309,539 parameters. No loss, optimizer, or training step was run.
+
 ## Next stages
 
-Stage 3 builds the timestep embedding and U-Net. Stage 4 trains the network to predict the noise used to form $x_t$. Only after that can Stage 5 use the learned reverse process to generate new images. The current viewer demonstrates the **forward** process on existing data, not learned generation.
+Stage 4 connects this model to the noise-prediction objective and begins with a tiny overfit/debug run before choosing a baseline training budget. Only after training can Stage 5 use the learned reverse process to generate new images. The current viewer demonstrates the **forward** process on existing data, not learned generation.
