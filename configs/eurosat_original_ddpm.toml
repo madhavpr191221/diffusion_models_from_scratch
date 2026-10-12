@@ -1,0 +1,47 @@
+# Ho et al. CIFAR-10 DDPM U-Net and paper-scale optimization, adapted to EuroSAT RGB 64x64.
+# The effective batch remains 128; micro_batch_size is checked by the GPU pilot.
+seed = 42
+image_size = 64
+image_channels = 3
+normalization_min = -1.0
+normalization_max = 1.0
+
+[dataset]
+repository = "blanchon/EuroSAT_RGB"
+revision = "655ef66ef2be07f89aec61407f24c772802eb87d"
+cache_dir = "data/huggingface"
+train_split = "train"
+validation_split = "validation"
+test_split = "test"
+
+[diffusion]
+timesteps = 1000
+beta_start = 0.0001
+beta_end = 0.02
+reverse_variance = "fixed_large"
+
+[model]
+architecture = "ddpm_cifar_v1"
+base_channels = 128
+channel_multipliers = [1, 2, 2, 2]
+residual_blocks_per_level = 2
+attention_resolutions = [16]
+dropout = 0.1
+
+[training]
+target_updates = 800000
+pilot_updates = 50
+effective_batch_size = 128
+micro_batch_size = 16
+learning_rate = 0.0002
+optimizer = "adam"
+warmup_updates = 5000
+gradient_clip = 1.0
+ema_decay = 0.9999
+horizontal_flip = true
+validation_images = 512
+validation_every_updates = 10000
+monitor_interval_updates = 100
+status_interval_updates = 10
+checkpoint_every_updates = 5000
+model_checkpoint_every_updates = 100000
