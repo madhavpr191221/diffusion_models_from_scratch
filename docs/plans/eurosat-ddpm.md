@@ -74,7 +74,15 @@ Extend the Stage 2.5 React/TypeScript/Vite UI and existing local FastAPI service
 - Training view: resolved run configuration, train/validation loss curves, and checkpoints.
 - Generation view: select a checkpoint, count, and seed; request generation; view generated images and reverse trajectory.
 
+The generation view uses a completed run's `best-val.pt`, defaults to eight patches and seed 42, and animates sample 0 from initial Gaussian noise to its final patch. The API runs the shared 1,000-step sampler in a background task, publishes a frame every ten updates for live playback, and saves the full trajectory and generated patch grid under a unique run artifact directory. The current baseline's visual quality is limited and must be represented honestly in the UI.
+
 Training and dataset download remain CLI workflows in v1. Implement a small local Python API that reads recorded artifacts and calls the same sampling functions as the CLI. The API must not reimplement diffusion equations. Keep API inputs typed/validated, write generated outputs under the run-artifact directory, and bind the service to localhost. Serve the built frontend from the API service; use the Vite development server with an API proxy during development. Acceptance: the production build succeeds and one local browser session can inspect a real run and generate images from its checkpoint.
+
+## Stage 7 ? Longer training and checkpoint inference
+
+Use `configs/eurosat_50_epoch.toml` for a fresh 50-epoch run, keeping the 64x64 U-Net, batch size 8, learning rate, optimizer, and 1,000-step schedule unchanged. Save epoch checkpoints every 10 epochs in addition to `best-val.pt` and resumable `latest.pt`. This is approximately 101,250 optimizer updates. The first two epochs of the active run averaged about 34 updates/second, suggesting roughly 50 minutes before validation and checkpoint overhead; revise the estimate from the live monitor.
+
+Before interpreting long-run output, inspect finite raw tensor ranges and report the fraction outside the training range `[-1,1]`. Preserve raw samples; clamp only for PNG display. Select saved checkpoints in the React Generate view and reuse a seed to compare outputs. Continue to train only on the train split, use validation loss for checkpoint selection, and leave test data untouched.
 
 ## Verification policy
 
@@ -83,3 +91,11 @@ Keep verification proportionate to this learning repository. Essential checks: s
 ## Out of scope for v1
 
 Conditional/class-based diffusion, multispectral or hyperspectral data, data augmentation, attention, `diffusers`, PyTorch Lightning, distributed training, classifier/text guidance, latent diffusion, DDIM, alternate samplers, remote hosting, and UI-driven training management.
+
+## Stage 9 — Diagnose generation drift and compare EMA
+
+First verify the existing ancestral posterior update at schedule indices 0, 499, and 999 against the configured equation with known noise. Keep the sampler unchanged if those checks pass. Log the current generation defect with its run ID, same-seed reproduction, raw value and trajectory evidence, timestep-bin validation results, and the distinction between confirmed symptoms and open root cause in `docs/bug-reports.md`.
+
+Run one fresh 50-epoch training experiment using `configs/eurosat_50_epoch_ema.toml`. It must differ from the prior 50-epoch recipe only by EMA shadow tracking (`decay=0.999`). Train on `train`, evaluate raw and EMA weights with identical fixed validation noise/timesteps, retain resumable raw/optimizer/RNG/EMA state, and save selectable best raw and EMA checkpoints. Display both validation curves in the existing React Training Monitor.
+
+Generate raw and EMA best-validation patches with the same seed, count, and full 1,000-step sampler. Compare raw ranges, outside-range fraction, RGB summaries, diversity, trajectory drift, and the preview grids in the existing Generate view. Append the result and any diagnosis update to BR-001 and the learning log. Consider the defect resolved only if the sample evidence improves; validation loss alone is insufficient.

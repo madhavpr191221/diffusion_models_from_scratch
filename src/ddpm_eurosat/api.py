@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import threading
+import time
 import tomllib
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -15,13 +18,14 @@ from uuid import uuid4
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from PIL import Image
 
 from ddpm_eurosat.data import UnconditionalEuroSATSplit, image_to_tensor, load_eurosat_rgb
 from ddpm_eurosat.diffusion import DiffusionSchedule, q_sample, q_sample_markov
+from ddpm_eurosat.sampling import LIVE_FRAME_STRIDE, choose_device, display_grid, generate_from_checkpoint
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = tomllib.loads((PROJECT_ROOT / "configs" / "base.toml").read_text(encoding="utf-8"))
@@ -98,12 +102,133 @@ class ActiveTrace:
 
 _active_trace: ActiveTrace | None = None
 _trace_lock = threading.Lock()
+_generation_lock = threading.Lock()
+_generation_progress_lock = threading.Lock()
+_active_generation: tuple[str, str] | None = None
 
 
 class CreateTraceRequest(BaseModel):
     image_index: int = Field(ge=0)
     mode: Literal["direct", "markov"]
     seed: int = Field(ge=0, le=4_294_967_295)
+
+
+class CreateGenerationRequest(BaseModel):
+    num_samples: int = Field(default=8, ge=1, le=8)
+    seed: int = Field(default=42, ge=0, le=4_294_967_295)
+    checkpoint: str = Field(default="best-val.pt", min_length=1, max_length=100)
+
+
+def atomic_json(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False), encoding="utf-8")
+    for attempt in range(8):
+        try:
+            os.replace(temporary, path)
+            break
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(0.015 * (attempt + 1))
+
+
+def read_generation_progress(output_dir: Path) -> dict[str, object]:
+    with _generation_progress_lock:
+        value = read_run_json(output_dir, "progress.json", {})
+    return value if isinstance(value, dict) else {}
+
+
+def write_generation_progress(path: Path, value: dict[str, object]) -> None:
+    with _generation_progress_lock:
+        atomic_json(path, value)
+
+
+def generation_dir(run_dir: Path, generation_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", generation_id):
+        raise HTTPException(status_code=404, detail="Generation not found")
+    path = run_dir / "generation" / generation_id
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="Generation not found")
+    return path
+
+
+def run_generation_job(
+    run_id: str,
+    generation_id: str,
+    checkpoint_path: Path,
+    output_dir: Path,
+    num_samples: int,
+    seed: int,
+    checkpoint_name: str,
+) -> None:
+    global _active_generation
+    progress_path = output_dir / "progress.json"
+    try:
+        progress = read_generation_progress(output_dir)
+        if not isinstance(progress, dict):
+            progress = {}
+        progress.update(state="running", updated_at=datetime.now(UTC).isoformat())
+        progress["checkpoint"] = checkpoint_name
+        write_generation_progress(progress_path, progress)
+
+        def publish_frame(frame_index: int, timestep: int, image: torch.Tensor) -> None:
+            frames_dir = output_dir / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            frame_path = frames_dir / f"frame-{frame_index:05d}.png"
+            display_grid(image.unsqueeze(0), frame_path, columns=1)
+            progress.update(
+                state="running",
+                completed_steps=min(frame_index * LIVE_FRAME_STRIDE, SCHEDULE.timesteps),
+                current_timestep=timestep,
+                latest_frame_index=frame_index,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+            write_generation_progress(progress_path, progress)
+
+        schedule_steps = SCHEDULE.timesteps
+        device = choose_device("auto")
+        reference_count = min(128, len(validation_images()))
+        reference = torch.stack([validation_images()[index] for index in range(reference_count)])
+        metadata = generate_from_checkpoint(
+            checkpoint_path,
+            output_dir,
+            num_samples=num_samples,
+            seed=seed,
+            device_name=str(device),
+            on_frame=publish_frame,
+            validation_reference_images=reference,
+        )
+        completed = {
+            "generation_id": generation_id,
+            "run_id": run_id,
+            "state": "completed",
+            "num_samples": num_samples,
+            "seed": seed,
+            "checkpoint": checkpoint_name,
+            "total_steps": schedule_steps,
+            "completed_steps": schedule_steps,
+            "current_timestep": 0,
+            "latest_frame_index": schedule_steps // LIVE_FRAME_STRIDE,
+            "frame_stride": LIVE_FRAME_STRIDE,
+            "updated_at": datetime.now(UTC).isoformat(),
+            "metadata": metadata,
+        }
+        write_generation_progress(progress_path, completed)
+    except Exception as error:
+        failed = read_generation_progress(output_dir)
+        failed.update(
+            generation_id=generation_id,
+            run_id=run_id,
+            state="failed",
+            error=f"{type(error).__name__}: {error}",
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        write_generation_progress(progress_path, failed)
+    finally:
+        with _generation_lock:
+            if _active_generation == (run_id, generation_id):
+                _active_generation = None
 
 
 @app.get("/api/health")
@@ -146,6 +271,11 @@ def list_runs() -> dict[str, list[dict[str, object]]]:
                     "total_epochs": status.get("total_epochs", 0),
                     "created_at": run_config.get("created_at"),
                     "updated_at": status.get("updated_at"),
+                    "can_generate": (
+                        status.get("state") == "completed"
+                        and status.get("mode") == "train"
+                        and (run_dir / "checkpoints" / "best-val.pt").is_file()
+                    ),
                 }
             )
     items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
@@ -168,7 +298,8 @@ def get_run_metrics(
     after_event: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
     run_dir = get_run_dir(run_id)
-    path = run_dir / "metrics.jsonl"
+    monitor_path = run_dir / "monitor_metrics.jsonl"
+    path = monitor_path if monitor_path.is_file() else run_dir / "metrics.jsonl"
     events: list[dict[str, object]] = []
     if path.is_file():
         with path.open(encoding="utf-8") as stream:
@@ -185,7 +316,122 @@ def get_run_metrics(
 @app.get("/api/runs/{run_id}/checkpoints")
 def get_run_checkpoints(run_id: str) -> dict[str, object]:
     run_dir = get_run_dir(run_id)
-    return {"items": read_run_json(run_dir, "checkpoint_manifest.json", [])}
+    manifest = read_run_json(run_dir, "checkpoint_manifest.json", [])
+    if not isinstance(manifest, list):
+        return {"items": []}
+    items = [
+        item
+        for item in manifest
+        if isinstance(item, dict)
+        and isinstance(item.get("name"), str)
+        and (run_dir / "checkpoints" / item["name"]).is_file()
+    ]
+    return {"items": items}
+
+
+@app.post("/api/runs/{run_id}/generations", status_code=202)
+def create_generation(
+    run_id: str,
+    request: CreateGenerationRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str | int]:
+    global _active_generation
+    run_dir = get_run_dir(run_id)
+    status = read_run_json(run_dir, "status.json", {})
+    manifest = read_run_json(run_dir, "checkpoint_manifest.json", [])
+    available = {
+        item.get("name")
+        for item in manifest
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    } if isinstance(manifest, list) else set()
+    if request.checkpoint not in available or Path(request.checkpoint).name != request.checkpoint:
+        raise HTTPException(status_code=404, detail="Checkpoint not found in this run")
+    checkpoint_path = run_dir / "checkpoints" / request.checkpoint
+    if (
+        not isinstance(status, dict)
+        or status.get("state") != "completed"
+        or status.get("mode") != "train"
+        or not checkpoint_path.is_file()
+    ):
+        raise HTTPException(status_code=409, detail="This run has no completed best-validation checkpoint")
+
+    with _generation_lock:
+        if _active_generation is not None:
+            raise HTTPException(status_code=409, detail="A generation is already running")
+        generation_id = uuid4().hex
+        output_dir = run_dir / "generation" / generation_id
+        output_dir.mkdir(parents=True, exist_ok=False)
+        initial = {
+            "generation_id": generation_id,
+            "run_id": run_id,
+            "state": "queued",
+            "num_samples": request.num_samples,
+            "seed": request.seed,
+            "checkpoint": request.checkpoint,
+            "total_steps": SCHEDULE.timesteps,
+            "completed_steps": 0,
+            "current_timestep": SCHEDULE.timesteps,
+            "latest_frame_index": -1,
+            "frame_stride": LIVE_FRAME_STRIDE,
+        }
+        write_generation_progress(output_dir / "progress.json", initial)
+        _active_generation = (run_id, generation_id)
+        background_tasks.add_task(
+            run_generation_job,
+            run_id,
+            generation_id,
+            checkpoint_path,
+            output_dir,
+            request.num_samples,
+            request.seed,
+            request.checkpoint,
+        )
+    return {"generation_id": generation_id, "run_id": run_id, "state": "queued"}
+
+
+@app.get("/api/runs/{run_id}/generations/{generation_id}")
+def get_generation(run_id: str, generation_id: str) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_dir(run_dir, generation_id)
+    progress = read_generation_progress(output_dir)
+    if progress.get("state") in {"queued", "running"}:
+        with _generation_lock:
+            is_active = _active_generation == (run_id, generation_id)
+        if not is_active:
+            progress.update(state="interrupted", error="The API stopped before generation completed")
+    return progress
+
+
+@app.get("/api/runs/{run_id}/generations/{generation_id}/frames/{frame_index}")
+def get_generation_frame(run_id: str, generation_id: str, frame_index: int) -> Response:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_dir(run_dir, generation_id)
+    progress = read_generation_progress(output_dir)
+    latest = int(progress.get("latest_frame_index", -1))
+    if frame_index < 0 or frame_index > latest:
+        raise HTTPException(status_code=404, detail="That denoising frame is not available yet")
+    frame_path = output_dir / "frames" / f"frame-{frame_index:05d}.png"
+    if not frame_path.is_file():
+        raise HTTPException(status_code=404, detail="Denoising frame not found")
+    timestep = max(SCHEDULE.timesteps - frame_index * LIVE_FRAME_STRIDE, 0)
+    return FileResponse(
+        frame_path,
+        media_type="image/png",
+        headers={"X-Timestep": str(timestep), "Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/runs/{run_id}/generations/{generation_id}/samples.png")
+def get_generation_samples(run_id: str, generation_id: str) -> FileResponse:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_dir(run_dir, generation_id)
+    progress = read_generation_progress(output_dir)
+    if progress.get("state") != "completed":
+        raise HTTPException(status_code=409, detail="Generated sample grid is not ready")
+    samples_path = output_dir / "samples.png"
+    if not samples_path.is_file():
+        raise HTTPException(status_code=404, detail="Generated sample grid not found")
+    return FileResponse(samples_path, media_type="image/png", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/learning-log")

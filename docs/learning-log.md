@@ -1,10 +1,10 @@
 # DDPM Learning Log
 
-This is the learner-facing record of what the project has implemented and what the evidence shows. It is intentionally separate from the normative specification and implementation plan. Last updated 2026-10-11.
+This is the learner-facing record of what the project has implemented and what the evidence shows. It is intentionally separate from the normative specification and implementation plan. Last updated 2026-10-12.
 
 ## Current status
 
-Stages 0, 1, 2, 2.5, 3, 4, and 5 are implemented. The 64-image pilot and five-epoch baseline completed on CUDA, and the saved checkpoint now produces unconditional samples through the full ancestral reverse chain. The forward viewer still explores noise added to real images; reverse sampling starts from Gaussian noise.
+Stages 0 through 9 are implemented. The latest controlled EMA training run completed all 101,250 updates on CUDA in about 76 minutes. Its best raw validation MSE was 0.013333; its best EMA validation MSE was 0.013079. Reverse sampling remains the full unconditional 1,000-step ancestral process. The test split remains untouched.
 
 ## Stage 0 — Project foundation
 
@@ -170,6 +170,51 @@ Artifacts are in `runs/20261011-061727-train-seed-42/generation/seed-42/`: `samp
 
 The eight-image run completed in 4.3 seconds on CUDA. The saved tensors are finite and the raw sample range was approximately `[-3.67, 6.00]`. Visual inspection shows the current samples are highly saturated and noisy, with little recognizable land-cover structure. The implementation and training loss are evidence that the reverse calculation runs, not evidence that this five-epoch model has learned useful image generation. The test split was not accessed.
 
+## Stage 6 — Live generation in the React app
+
+The **Generate** view selects a completed training run and can select any checkpoint from the run manifest. Set a seed and request 1–8 patches. Generation runs in a FastAPI background task so the UI can poll progress while the model performs the full 1,000 reverse updates. The app animates the first sample using 101 preview frames (initial noise, every ten reverse updates, and the final patch), then displays the complete patch grid. Raw samples, all 1,001 trajectory states for sample 0, preview PNGs, and metadata are written under `runs/<run-id>/generation/<generation-id>/`.
+
+For development, run the API and Vite frontend in separate terminals as in Stage 2.5, then open the Vite URL and select **Generate**. For a single-server local session, build the frontend with `npm run build --prefix web`, start the API, and open `http://127.0.0.1:8000`. The API exposes routes to start generation, poll progress, retrieve available trajectory frames, and retrieve the completed sample grid. Inference uses the shared CLI sampler and does not load EuroSAT images or labels.
+
+## Stage 7 ? Longer retraining and checkpoint inference
+
+The new `configs/eurosat_50_epoch.toml` keeps the model and optimizer settings fixed and increases the run to 50 epochs. It saves a selectable checkpoint every 10 epochs while retaining `best-val.pt` and resumable `latest.pt`. The run has 101,250 optimizer updates. Its first two epochs averaged about 34 updates/second, suggesting roughly 50 minutes before validation and checkpoint overhead. Training reads only the train split; validation supplies epoch diagnostics; the test split stays untouched.
+
+An early checkpoint's samples were finite but many values fell outside `[-1,1]`; preview clipping therefore produced saturated patches. The Generate controls select a checkpoint so the same seed can be used to inspect outputs at different training stages. A lower validation MSE remains an optimization measure, not a guarantee of realistic patches.
+
+The earlier epoch-10 sample from the 50-epoch run used seed 42 and eight patches. It completed all 1,000 reverse steps, but about 63.0% of its raw values were outside `[-1,1]`; its preview was visibly saturated. This is an intermediate checkpoint and is not a final quality assessment. Stage 8 compares checkpoints 10, 20, 30, 40, 50, and `best-val.pt` under the same seed/count, and records RGB channel means, standard deviations and quantiles, outside-range fraction, per-image pixel variation, and pairwise pixel RMSE. The reference summary uses the first 128 validation images by split index, without labels.
+
+The controlled run is saved under `runs/20261012-045942-train-seed-42/generation/study-seed-42/`. Its combined visual is `checkpoint-comparison.png`. Across the six checkpoints, 62.3%–69.6% of raw generated values fell outside `[-1,1]`; pairwise pixel RMSE was 2.10–2.34. The fixed validation reference had no values outside the range and pairwise RMSE 0.399. The grid remains strongly saturated and does not show convincing land-cover structure. More epochs alone have not resolved the generation failure. Do not judge these samples by clipped PNG colors alone; use the saved raw tensors and diagnostics.
+
 ## Next stages
 
-Stage 5 reverse sampling is complete. The Stage 4 checkpoint-resume smoke check remains a follow-up. Stage 6 can expose generated samples and trajectories through the existing React application and local API; no separate UI is planned.
+The broader dashboard dataset summary and Stage 4 checkpoint-resume smoke check remain follow-ups.
+
+## Stage 9 — Diagnose drift and compare EMA
+
+Bug report [BR-001](bug-reports.md) records the generation failure and evidence used to investigate it. The prior 50-epoch run's best-validation trajectory mean drifted from about `-0.003` at Gaussian initialization to `+2.05` at the final sample. Validation noise-prediction MSE was low on forward-noised validation images, but that evaluates inputs from the data distribution; it does not show how the model behaves when fed its own reverse-process outputs.
+
+The posterior update matched its configured equation exactly at indices 0, 499, and 999. At index 0, supplying Gaussian noise or omitting it returned the same result. The checkpoint and sampler schedule matched, so no sampling formula change was justified by these checks.
+
+The controlled run used `configs/eurosat_50_epoch_ema.toml`, identical to the previous 50-epoch configuration except for EMA decay `0.999`. It trained for 50 epochs, 101,250 updates, on the train split only; validation selected checkpoints; the test split was not loaded. Artifacts are under `runs/20261012-064627-train-seed-42/`. The training monitor now shows both raw and EMA validation loss, and the Generate view can select `best-val.pt` or `best-val-ema.pt`.
+
+With eight samples and seed 42, raw best-val generation had 65.2% of values outside `[-1,1]`, pairwise pixel RMSE 2.161, and final trajectory mean `+2.082`. EMA best-val generation had 64.2% outside range, pairwise RMSE 2.028, and final trajectory mean `+1.050`. Both used the same full sampler. The first 128 validation images had no values outside `[-1,1]` and pairwise RMSE `0.399`. EMA reduced the trajectory mean drift and slightly reduced the out-of-range fraction, but previews remain strongly saturated and do not show consistently coherent EuroSAT patches. This is a partial improvement, not a resolution; BR-001 remains open and the underlying cause is not confirmed.
+
+
+At matching timestep index 500, the raw sample path's implied clean estimate had mean `+2.031` with 87.5% outside `[-1,1]`; the forward-noised validation estimate had mean `-0.152` with 0.12% outside. For EMA, those values were `+1.042` / 54.4% versus `-0.164` / 0.09%. At index 300, 92.9% of raw and 42.6% of EMA generated estimates were outside range, compared with about 0.1% on validation. This localizes substantial drift to the model's own reverse states rather than ordinary forward-noised validation inputs.
+
+A sensitivity probe added a known uniform `+0.5` input shift to validation `x_t`. If the clean image is held fixed, this corresponds to a noise-target shift of about `+0.50` to `+0.64` at indices 700 to 300. The model's predicted-noise mean changed by only about `+0.01` for both raw and EMA weights. Repeated GroupNorm layers could suppress global intensity information; this is a supported hypothesis, not a confirmed sole cause. The next controlled experiment should add a small branch that takes the three per-channel spatial means of `x_t` and the timestep embedding, predicts three channelwise noise offsets, and broadcasts them over the U-Net output. This gives global intensity information a path around GroupNorm. Keep the sampler, data, optimizer, seed, schedule, EMA, and 50-epoch budget fixed; change only this architecture path.
+
+Verification: `pytest tests/test_ema.py` passed (2 tests), Python compilation passed, and the React production build passed. The EMA checkpoint also passed the existing API generation workflow: it appeared in the manifest, completed 1,000 reverse steps, and served a final grid and frame. A Windows browser surface was not available in this session, so visual review used the saved raw/EMA grids rather than a live browser click-through.
+
+## Stage 10 � Original DDPM U-Net pilot and full run
+
+The ported CIFAR-10 DDPM U-Net has 35,746,307 parameters and accepts `3�64�64` RGB patches. A 50-update GPU pilot used EuroSAT training examples, microbatch 16, effective batch 128, Adam, warmup, gradient clipping, and EMA. It completed in 96.8 seconds at 0.517 optimizer updates/second, with 3.52 GB peak allocated GPU memory. Linear extrapolation gives about 17.9 days for 800,000 updates; this excludes validation, checkpoint I/O, and any pauses, so it is a lower-bound planning estimate. This measures throughput and memory, not sample quality or convergence. The pilot did not load the test split.
+
+The full run started as `20261012-103416-train-seed-42` with 800,000 planned updates. It is using only train data for gradient updates and a 512-image validation subset every 10,000 updates for checkpoint selection; a full validation pass is planned at completion. The run status metadata records `test_split_loaded: false`. At the latest check it was active at update 20; generation quality is not available until a checkpoint is saved.
+
+### Runtime correction � practical original-U-Net run
+
+The 800,000-update launch was impractical for this laptop: it stopped at update 125 before the first durable checkpoint, and therefore cannot be resumed. The 800,000-update config remains as a paper-scale reference only. The recommended EuroSAT experiment is now 50 epochs at effective batch 128: 6,350 updates, 40 warmup updates, EMA decay 0.999, validation every five epochs, latest checkpoint every epoch, and EMA snapshots every ten epochs. At the observed steady rate this should take about 3.5�4 hours plus validation and checkpoint overhead. This is a practical dataset-specific run, not a full reproduction of the paper's optimization budget.
+
+The practical run `20261012-104411-train-seed-42` has started on CUDA. The test split remains unloaded. Assess generated samples and trajectory diagnostics before claiming the architecture resolves BR-001.

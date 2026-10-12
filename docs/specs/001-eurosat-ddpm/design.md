@@ -69,3 +69,36 @@ React/TypeScript/Vite is the only UI. The Stage 2.5 forward-noise view remains a
 `ddpm_reverse_step` implements the epsilon-prediction posterior update using zero-based schedule index `i`. For `i > 0`, it adds Gaussian noise scaled by `sqrt(beta_tilde_i)`, where `beta_tilde_i = beta_i * (1 - alpha_bar_(i-1)) / (1 - alpha_bar_i)`. At index 0, `alpha_bar_previous = 1` and no random noise is added. `sampling.py` loads a compatible checkpoint, uses the full configured schedule and a device-local seeded generator, and stores raw tensors without clipping. PNG conversion alone clips to `[-1,1]`.
 
 The CLI writes `samples.pt`, `samples.png`, `trajectory.pt`, `trajectory.png`, and `metadata.json` under `runs/<run-id>/generation/seed-<seed>/`. The trajectory contains `x_T` followed by each reverse state through `x_0`, for `T+1` frames. One selected sample is retained to bound storage. Generation starts only from Gaussian noise and does not read any dataset split.
+
+## Stage 6 live generation view
+
+The Generate view lists only completed training runs with `checkpoints/best-val.pt`. It defaults to the newest eligible run, eight samples, and seed 42; users may select another eligible run, a count from 1 to 8, and a seed. Generation starts asynchronously through `POST /api/runs/{run_id}/generations`. The API reports state/progress through `GET /api/runs/{run_id}/generations/{generation_id}`, exposes each published PNG through `/frames/{frame_index}`, and serves the completed grid through `/samples.png`.
+
+The API calls the shared `generate_from_checkpoint` and `sample_chain` functions. It publishes frame 0 (`x_T`) and then a frame every ten reverse updates, ending at `x_0`; the sampler still executes and saves all 1,000 reverse updates and the full trajectory. Only one generation job runs at a time in the local API process. A second start request returns conflict until the active job completes or fails. Generation artifacts are stored under the selected run's unique `generation/<generation-id>/` directory. No EuroSAT split is loaded for generation.
+
+
+## Stage 7 longer training and checkpoint inference
+
+Keep the baseline architecture, batch size, optimizer, learning rate, dataset revision, seed, and 1,000-step schedule fixed in a separate 50-epoch config. Save checkpoints at epochs 10, 20, 30, 40, and 50, in addition to best-validation and latest. The saved run config remains the source of truth for resume behavior.
+
+The generation API accepts a checkpoint filename only when it is present in the run manifest and resolves inside that run's checkpoint directory. The UI can select checkpoints and accumulate same-seed result grids for visual comparison. Preserve generated tensors outside `[-1,1]`; record their range and out-of-range fraction, and clip only while creating preview PNGs. Sampling remains unconditional and does not load dataset images or labels.
+
+## Stage 9 sampler diagnosis and EMA comparison
+
+Keep `docs/bug-reports.md` as an append-only issue log. Record the current saturated-sample symptom as an open generation defect: include the run ID, matched-seed reproduction, out-of-range fractions, trajectory mean drift, diagnostic method, equation/index check results, and any remaining uncertainty about its root cause.
+
+Before retraining, compare `ddpm_reverse_step` at the first, middle, and last schedule indices to the configured posterior mean/variance using supplied noise. Confirm the final index is deterministic and that the checkpoint's schedule equals the sampler schedule. Do not alter the sampler or clamp raw tensors if these checks pass.
+
+Use a separate 50-epoch config matching Stage 7, with only `training.ema_decay = 0.999` added. Update the EMA shadow after every optimizer update. Evaluate raw and EMA weights against the same fixed validation timesteps/noise each epoch. Save `best-val-ema.pt` with EMA weights for inference while retaining raw training weights, optimizer state, RNG state, and EMA state in resumable checkpoints. `latest.pt` resumes raw optimization and restores the EMA shadow; the existing manifest/API/UI selection path exposes both best checkpoints.
+
+Compare `best-val.pt` and `best-val-ema.pt` with the same seed, sample count, schedule, and ancestral sampler. Record raw ranges, out-of-range fraction, per-channel summaries, pairwise variation, and selected trajectory means, then inspect both previews in the existing React Generate view. EMA is an improvement only if quantitative diagnostics and visual structure support it; validation loss alone is not a generation-quality measure.
+
+## Stage 10: original DDPM CIFAR-10 U-Net on EuroSAT
+
+Port the authors' unconditional CIFAR-10 U-Net from [their released implementation](https://github.com/hojonathanho/diffusion) to PyTorch. Use 128 base channels, multipliers `(1, 2, 2, 2)`, two residual blocks at each level, attention at 16x16 and in the middle block, GroupNorm, Swish/SiLU, 0.1 dropout, and the original timestep embedding and zero-initialized residual/output projections. At EuroSAT resolution, feature scales are 64, 32, 16, and 8 pixels. The expected parameter count is about 35.7M; the input/output contract remains `[B,3,64,64]`.
+
+New run configs declare `model.architecture = "ddpm_cifar_v1"`. Configs without an architecture identifier remain mapped to the compact U-Net so existing checkpoints continue to load. Training and sampling factories use the saved checkpoint config.
+
+The dedicated 800,000-update run uses the paper's CIFAR training defaults where practical: Adam, effective batch 128, learning rate 2e-4 with 5,000-update warmup, global gradient clipping at 1.0, EMA 0.9999, train-only horizontal flips, epsilon MSE, and the 1,000-step linear beta schedule from 0.0001 to 0.02. Microbatching plus gradient accumulation maintains effective batch 128 on the 8 GB GPU. Use fixed-large reverse variance for this paper-recipe config; legacy configs default to posterior variance. The test split is never loaded.
+
+Validate on a fixed 512-image subset every 10,000 updates using reproducible noise/timesteps, and run a full validation pass at completion. Save full `latest.pt` resume state every 5,000 updates, compact EMA-only milestones every 100,000 updates, and model-only best raw/EMA checkpoints. Keep raw per-update training metrics in `metrics.jsonl`; serve the existing React monitor a compact stream with one mean-loss point per 100 updates plus validation points. The existing Generate view uses architecture-aware loading for best EMA and milestone checkpoints.

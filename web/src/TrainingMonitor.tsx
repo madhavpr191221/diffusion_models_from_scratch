@@ -11,10 +11,11 @@ type RunSummary = {
 }
 type MetricEvent = {
   event_id: number
-  kind: 'train' | 'validation'
+  kind: 'train' | 'validation' | 'validation_full'
   epoch: number
   global_step: number
   loss: number
+  ema_loss?: number | null
   train_epoch_loss?: number
   elapsed_seconds: number
 }
@@ -42,7 +43,7 @@ type Checkpoint = {
 }
 type ResolvedConfig = {
   seed?: number
-  training?: { batch_size?: number; epochs?: number; learning_rate?: number; optimizer?: string }
+  training?: { batch_size?: number; effective_batch_size?: number; micro_batch_size?: number; epochs?: number; learning_rate?: number; optimizer?: string }
   diffusion?: { timesteps?: number }
 }
 
@@ -53,13 +54,17 @@ async function getJson<T>(url: string): Promise<T> {
 }
 
 function LossChart({ events }: { events: MetricEvent[] }) {
-  const train = events.filter((event) => event.kind === 'train')
-  const validation = events.filter((event) => event.kind === 'validation')
+  const latestByStep = new Map<string, MetricEvent>()
+  for (const event of events) latestByStep.set(`${event.kind}:${event.global_step}`, event)
+  const currentEvents = [...latestByStep.values()].sort((first, second) => first.global_step - second.global_step)
+  const train = currentEvents.filter((event) => event.kind === 'train')
+  const validation = currentEvents.filter((event) => event.kind === 'validation' || event.kind === 'validation_full')
   const smoothed = train.map((event, index) => {
     const window = train.slice(Math.max(0, index - 99), index + 1)
     return { step: event.global_step, loss: window.reduce((sum, item) => sum + item.loss, 0) / window.length }
   })
-  const values = [...train.map((event) => event.loss), ...validation.map((event) => event.loss)]
+  const emaValidation = validation.filter((event) => event.ema_loss != null)
+  const values = [...train.map((event) => event.loss), ...validation.map((event) => event.loss), ...emaValidation.map((event) => event.ema_loss as number)]
   if (!values.length) return <div className="chart-empty">Loss values will appear after the first update.</div>
 
   const width = 900
@@ -68,8 +73,8 @@ function LossChart({ events }: { events: MetricEvent[] }) {
   const right = 18
   const top = 20
   const bottom = 34
-  const minStep = Math.min(...events.map((event) => event.global_step))
-  const maxStep = Math.max(1, ...events.map((event) => event.global_step))
+  const minStep = Math.min(...currentEvents.map((event) => event.global_step))
+  const maxStep = Math.max(1, ...currentEvents.map((event) => event.global_step))
   const minLoss = Math.min(...values)
   const maxLoss = Math.max(...values)
   const lossSpan = Math.max(maxLoss - minLoss, Math.abs(maxLoss) * 0.08, 1e-5)
@@ -89,8 +94,9 @@ function LossChart({ events }: { events: MetricEvent[] }) {
         {rawPoints && <polyline points={rawPoints} className="chart-raw" />}
         {smoothPoints && <polyline points={smoothPoints} className="chart-smooth" />}
         {validation.map((event) => <circle key={event.event_id} cx={x(event.global_step)} cy={y(event.loss)} r="4.5" className="chart-validation" />)}
+        {emaValidation.map((event) => <rect key={`ema-${event.event_id}`} x={x(event.global_step) - 4} y={y(event.ema_loss as number) - 4} width="8" height="8" className="chart-validation-ema" />)}
       </svg>
-      <div className="chart-legend"><span><i className="legend-raw" />Per-update training loss</span><span><i className="legend-smooth" />100-update moving average</span><span><i className="legend-validation" />Validation loss by epoch</span></div>
+      <div className="chart-legend"><span><i className="legend-raw" />100-update mean loss</span><span><i className="legend-smooth" />Smoothed monitor curve</span><span><i className="legend-validation" />Raw validation loss</span><span><i className="legend-validation-ema" />EMA validation loss</span></div>
       <div className="chart-range"><span>{minLoss.toFixed(4)}</span><span>{maxLoss.toFixed(4)}</span></div>
     </div>
   )
@@ -198,9 +204,9 @@ export default function TrainingMonitor() {
         <div className="monitor-empty panel">
           <h2>No training run yet</h2>
           <p>From the repository root, first run the small GPU pilot:</p>
-          <code>uv run --locked python -m ddpm_eurosat.train --pilot</code>
-          <p>Then run the baseline:</p>
-          <code>uv run --locked python -m ddpm_eurosat.train</code>
+          <code>uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_original_ddpm.toml --pilot</code>
+          <p>Then start the paper-scale EuroSAT run:</p>
+          <code>uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_original_ddpm.toml</code>
           <p>The test split is not loaded by either training command.</p>
         </div>
       ) : (
@@ -215,13 +221,13 @@ export default function TrainingMonitor() {
               <div><small>UPDATES / SEC</small><b>{status?.steps_per_second?.toFixed(2) ?? '—'}</b></div>
               <div><small>PEAK GPU MEMORY</small><b>{status?.peak_gpu_memory_mb ? `${status.peak_gpu_memory_mb.toFixed(0)} MB` : '—'}</b></div>
             </div>
-            {resolvedConfig && <div className="resolved-config"><span>SEED <b>{resolvedConfig.seed ?? '—'}</b></span><span>OPTIMIZER <b>{resolvedConfig.training?.optimizer ?? '—'}</b></span><span>LEARNING RATE <b>{resolvedConfig.training?.learning_rate ?? '—'}</b></span><span>BATCH SIZE <b>{resolvedConfig.training?.batch_size ?? '—'}</b></span><span>DIFFUSION STEPS <b>{resolvedConfig.diffusion?.timesteps ?? '—'}</b></span></div>}
+            {resolvedConfig && <div className="resolved-config"><span>SEED <b>{resolvedConfig.seed ?? '—'}</b></span><span>OPTIMIZER <b>{resolvedConfig.training?.optimizer ?? '—'}</b></span><span>LEARNING RATE <b>{resolvedConfig.training?.learning_rate ?? '—'}</b></span><span>EFFECTIVE BATCH <b>{resolvedConfig.training?.effective_batch_size ?? resolvedConfig.training?.batch_size ?? '—'}</b></span><span>DIFFUSION STEPS <b>{resolvedConfig.diffusion?.timesteps ?? '—'}</b></span></div>}
             {status?.error && <div className="error-banner">{status.error}</div>}
           </section>
 
           <section className="panel chart-panel">
-            <div className="panel-heading"><div><span className="section-index">01</span><h2>Noise-prediction loss</h2></div><span className="split-label">TRAIN UPDATES + VALIDATION EPOCHS</span></div>
-            <p className="panel-copy">Training minimizes mean squared error between the sampled noise and the U-Net prediction. The moving average makes the noisy per-batch curve easier to read.</p>
+            <div className="panel-heading"><div><span className="section-index">01</span><h2>Noise-prediction loss</h2></div><span className="split-label">TRAIN UPDATES + VALIDATION CHECKPOINTS</span></div>
+            <p className="panel-copy">Training minimizes mean squared error between the sampled noise and the U-Net prediction. The curve shows 100-update mean loss; validation runs every 10,000 updates.</p>
             <LossChart events={events} />
             <div className="learning-note"><b>How to read this:</b> A downward loss trend means the model is improving at this noise-prediction task. It does not by itself tell us whether generated images look good.</div>
           </section>

@@ -114,8 +114,9 @@ def ddpm_reverse_step(
     timestep: int,
     *,
     noise: Tensor | None = None,
+    variance_type: str = "posterior",
 ) -> Tensor:
-    """Apply one ancestral DDPM update using the posterior variance.
+    """Apply one ancestral DDPM update using posterior or fixed-large variance.
 
     ``timestep`` is a zero-based schedule index. The final update (index 0)
     is deterministic; no random noise is added. Supply ``noise`` to make a
@@ -123,6 +124,8 @@ def ddpm_reverse_step(
     """
     if not 0 <= timestep < schedule.timesteps:
         raise IndexError(f"timestep must be in [0, {schedule.timesteps - 1}]")
+    if variance_type not in {"posterior", "fixed_large"}:
+        raise ValueError("variance_type must be 'posterior' or 'fixed_large'")
     if x_t.ndim != 4 or not x_t.is_floating_point():
         raise ValueError("x_t must be a floating [B,C,H,W] tensor")
     if predicted_noise.shape != x_t.shape or predicted_noise.device != x_t.device:
@@ -138,7 +141,7 @@ def ddpm_reverse_step(
         if timestep > 0
         else torch.ones((), device=x_t.device, dtype=x_t.dtype)
     )
-    posterior_variance = beta * (1.0 - alpha_bar_previous) / (1.0 - alpha_bar)
+    posterior_variance = beta if variance_type == "fixed_large" else beta * (1.0 - alpha_bar_previous) / (1.0 - alpha_bar)
     mean = (x_t - beta * predicted_noise / torch.sqrt(1.0 - alpha_bar)) / torch.sqrt(alpha)
     if timestep == 0:
         return mean

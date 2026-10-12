@@ -68,6 +68,50 @@ Stage 3 evidence: A CPU forward pass with batch size 2 and timesteps `[0,999]` r
 
 ## Stage 6 — Local dashboard
 
-- [ ] Implement dataset, forward-noising, run metrics/checkpoint, and generation views.
-- [ ] Connect the frontend to the local API without duplicating diffusion logic.
-- [ ] Verify the production build and one local end-to-end browser workflow.
+- [ ] Add a dataset summary and combine the existing forward-noising and training-monitor views into the broader dashboard.
+- [x] Add an existing-app Generate view with completed-run selection, best-validation checkpoint, seed/count controls, live reverse progress, one animated trajectory, and a final patch grid.
+- [x] Add background generation and progress/frame/result API routes that call the shared sampler without accessing dataset splits.
+- [x] Verify API generation, live progress metadata, preview frames, and the completed sample grid from a saved checkpoint.
+- [x] Build the production frontend successfully. Browser click-through remains unverified because no browser surface is available to this session.
+
+
+## Stage 7 ? Longer retraining and checkpoint inference
+
+- [x] Add a fresh 50-epoch config preserving baseline architecture and optimizer settings.
+- [x] Save selectable epoch checkpoints at 10-epoch intervals while preserving best-validation and resumable latest checkpoints.
+- [x] Allow the local API to generate from a run-manifest checkpoint and report output range/clipping diagnostics.
+- [x] Add checkpoint selection and same-seed comparison grids in the existing React Generate view.
+- [x] Document the command, runtime estimate, train/validation/test boundary, and interpretation limits.
+- [x] Verify compile, frontend build, and one selected-checkpoint inference API workflow.
+- [x] Complete the fresh 50-epoch CUDA run; final validation MSE was 0.013354 and best was 0.013326.
+
+## Stage 8 — Controlled generation evaluation
+
+- [x] Add per-sample-batch channel, range, clipping, pixel-variation, and pairwise-diversity summaries to generation metadata.
+- [x] Attach a fixed first-128-image validation reference summary to UI-triggered generations; the test split is never loaded.
+- [x] Show comparable summaries with checkpoint grids in the existing React Generate view.
+- [x] Generate eight samples with seed 42 from best-validation and epoch 10/20/30/40/50 checkpoints; retain complete reverse trajectories.
+- [x] Inspect the checkpoint grid and record raw-range/diversity summaries against the fixed validation reference.
+- [x] Use the failure pattern to select the next step: diagnose timestep-wise denoising and reverse-chain statistics before changing training or sampling.
+
+## Stage 9 — Diagnose generation drift and compare EMA
+
+- [x] Add append-only bug report BR-001 with reproduction, raw tensor evidence, diagnosis, and open root-cause status.
+- [x] Verify posterior update/index behavior at indices 0, 499, and 999, including deterministic index 0.
+- [x] Add a separate 50-epoch config with EMA decay 0.999 and preserve raw/EMA states in resumable checkpoints.
+- [x] Expose raw and EMA validation losses in the React training monitor and make best EMA weights selectable in generation.
+- [x] Add focused EMA update and checkpoint-payload tests.
+- [x] Complete the controlled CUDA run and compare best raw/EMA samples with the same seed and count.
+- [x] Append outcome and resolution status to BR-001 and the learning log; retain BR-001 as open because generation remains saturated.
+- [x] Compare denoiser behavior on generated reverse states and forward-noised validation images at matching timesteps; probe sensitivity to a uniform intensity shift.
+- [x] Record the supported GroupNorm/global-mean hypothesis and choose a mean-preserving denoiser path as the next controlled experiment.
+
+## Stage 10 � Original DDPM U-Net and paper-scale EuroSAT run
+
+- [x] Port the original CIFAR-10 DDPM U-Net to PyTorch at 64�64, including architecture metadata and legacy-checkpoint fallback.
+- [x] Add paper-recipe configuration: Adam, 128 effective batch, warmup, EMA, train-only horizontal flips, and fixed-large sampling variance.
+- [x] Add update-based training, compact monitor metrics, resumable latest state, and model-only EMA milestones.
+- [x] Complete GPU memory/throughput pilot and estimate full-run wall time (50 updates, microbatch 16: 0.517 updates/s, 3.52 GB peak; approximately 18 days for 800,000 updates before overhead).
+- [ ] Complete the practical 50-epoch run (6,350 updates) with validation-only checkpoint selection; never load test split. (The 800,000-update reference schedule is not being run; estimated at about 18 days.)
+- [ ] Generate same-seed EMA samples in the existing React UI and append outcome to BR-001 / learning log.
+- [ ] Validate training resume, checkpoint sampling, legacy checkpoint loading, and frontend build.
