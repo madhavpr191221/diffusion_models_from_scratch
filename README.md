@@ -83,6 +83,12 @@ uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_50_epoch_e
 
 The training monitor plots raw and EMA validation losses. The run saves `best-val.pt```and `best-val-ema.pt`; the Generate view defaults to the EMA checkpoint when available and can accumulate same-seed raw/EMA grids for comparison. Record generation failures and their evidence in the append-only bug report.
 
+## Generate and judge a cohort
+
+In the React **Generate** view, use **Generate and judge a cohort** to create a chosen total of 1–1,000 patches from one checkpoint and seed. Generation runs locally in chunks of up to 8. Review the completed grid, then explicitly choose **Judge cohort**. The backend submits the generated patches individually to the OpenAI Responses API in sequential groups of 10 (the final group can be smaller), alongside the same unlabeled 4×4 sheet of 16 validation patches. The report gives each patch a stable ID, a subjective resemblance rating, visible gap categories, and a concise explanation, plus cohort-level counts. Numeric sampler diagnostics are shown alongside the visual ratings; neither is proof that the patches are realistic.
+
+Put `OPENAI_API_KEY=...` in the ignored root `.env` file. The FastAPI process loads it locally; the React browser never receives the key. Generation works without a key, but judging requires one. Generated cohort tensors, grids, and judgement JSON are saved under `runs/<run-id>/generation-studies/<study-id>/`. The test split is not used.
+
 ## Dataset inspection
 
 The first data milestone uses the pinned Hugging Face EuroSAT RGB revision. To download/reuse its local cache and regenerate the inspection report and preview:

@@ -13,6 +13,8 @@ dependencies = [
     "fastapi",
     "uvicorn[standard]",
     "datasets==5.1.0",
+    "openai>=3.29.0",
+    "python-dotenv>=1.2.4",
 ]
 
 [dependency-groups]

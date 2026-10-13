@@ -242,6 +242,111 @@ def generate_from_checkpoint(
     return metadata
 
 
+def generate_cohort_from_checkpoint(
+    checkpoint_path: Path,
+    output_dir: Path,
+    *,
+    num_samples: int,
+    seed: int,
+    device_name: str = "auto",
+    batch_size: int = 8,
+    on_progress: Callable[[int, int], None] | None = None,
+    validation_reference_images: torch.Tensor | None = None,
+    validation_reference_selection: str = "",
+) -> dict[str, Any]:
+    """Generate a large cohort in bounded GPU batches and save its artifacts."""
+    if not 1 <= num_samples <= 1000:
+        raise ValueError("num_samples must be between 1 and 1000")
+    if not 1 <= batch_size <= 8:
+        raise ValueError("batch_size must be between 1 and 8")
+
+    checkpoint_path = checkpoint_path.resolve()
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = choose_device(device_name)
+    checkpoint, config = load_checkpoint(checkpoint_path, device)
+    diffusion = config["diffusion"]
+    schedule = DiffusionSchedule(
+        timesteps=int(diffusion["timesteps"]),
+        beta_start=float(diffusion["beta_start"]),
+        beta_end=float(diffusion["beta_end"]),
+    ).to(device)
+    model = build_model(config).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+
+    chunks: list[torch.Tensor] = []
+    chunk_seeds: list[int] = []
+    for chunk_index, start in enumerate(range(0, num_samples, batch_size)):
+        count = min(batch_size, num_samples - start)
+        chunk_seed = (seed + chunk_index) % (2**32)
+        samples, _ = sample_chain(
+            model,
+            schedule,
+            count=count,
+            seed=chunk_seed,
+            device=device,
+            trajectory_index=None,
+            variance_type=str(diffusion.get("reverse_variance", "posterior")),
+        )
+        if not torch.isfinite(samples).all():
+            raise RuntimeError(f"Sampling produced non-finite image values in chunk {chunk_index + 1}")
+        chunks.append(samples)
+        chunk_seeds.append(chunk_seed)
+        if on_progress is not None:
+            on_progress(min(start + count, num_samples), num_samples)
+
+    all_samples = torch.cat(chunks, dim=0)
+    torch.save(all_samples, output_dir / "samples.pt")
+    display_grid(all_samples, output_dir / "samples.png", columns=min(10, num_samples))
+    patch_dir = output_dir / "patches"
+    patch_dir.mkdir(exist_ok=True)
+    for index, sample in enumerate(all_samples):
+        display_grid(sample.unsqueeze(0), patch_dir / f"patch-{index + 1:04d}.png", columns=1)
+    metadata = {
+        "created_at": datetime.now(UTC).isoformat(),
+        "checkpoint": str(checkpoint_path),
+        "checkpoint_global_step": int(checkpoint.get("global_step", -1)),
+        "checkpoint_epoch": int(checkpoint.get("epoch", -1)),
+        "device": str(device),
+        "seed": seed,
+        "chunk_size": batch_size,
+        "chunk_seeds": chunk_seeds,
+        "num_samples": num_samples,
+        "image_shape": [3, 64, 64],
+        "timesteps": schedule.timesteps,
+        "beta_start": float(diffusion["beta_start"]),
+        "beta_end": float(diffusion["beta_end"]),
+        "reverse_variance": str(diffusion.get("reverse_variance", "posterior")),
+        "sample_value_range": [float(all_samples.min()), float(all_samples.max())],
+        "fraction_outside_training_range": float((all_samples.abs() > 1.0).float().mean()),
+        "sample_statistics": summarize_images(all_samples),
+        "per_sample_diagnostics": [
+            {
+                "sample_id": f"patch-{index + 1:04d}",
+                "minimum": float(sample.min()),
+                "maximum": float(sample.max()),
+                "mean": float(sample.mean()),
+                "fraction_outside_training_range": float((sample.abs() > 1.0).float().mean()),
+            }
+            for index, sample in enumerate(all_samples)
+        ],
+        "validation_reference": (
+            {
+                "split": "validation",
+                "selection": validation_reference_selection or "fixed unlabeled validation reference set",
+                "statistics": summarize_images(validation_reference_images),
+            }
+            if validation_reference_images is not None
+            else None
+        ),
+        "display_clipping": "[-1,1] applied only when saving PNGs; raw tensors are preserved",
+    }
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2, allow_nan=False), encoding="utf-8"
+    )
+    return metadata
+
+
 def run(args: argparse.Namespace) -> Path:
     checkpoint_path = args.checkpoint.resolve()
     output_dir = (args.output_dir or checkpoint_path.parent.parent / "generation" / f"seed-{args.seed}").resolve()

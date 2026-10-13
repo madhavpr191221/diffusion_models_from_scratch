@@ -22,12 +22,23 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from PIL import Image
+from openai import OpenAI
+from dotenv import load_dotenv
 
 from ddpm_eurosat.data import UnconditionalEuroSATSplit, image_to_tensor, load_eurosat_rgb
 from ddpm_eurosat.diffusion import DiffusionSchedule, q_sample, q_sample_markov
+from ddpm_eurosat.generation_evaluation import (
+    GENERATION_CHUNK_SIZE,
+    JUDGEMENT_BATCH_SIZE,
+    REFERENCE_COUNT,
+    build_judgement_report,
+    generate_cohort,
+    judge_batch,
+)
 from ddpm_eurosat.sampling import LIVE_FRAME_STRIDE, choose_device, display_grid, generate_from_checkpoint
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(PROJECT_ROOT / ".env", override=False)
 CONFIG = tomllib.loads((PROJECT_ROOT / "configs" / "base.toml").read_text(encoding="utf-8"))
 DIFFUSION_CONFIG = CONFIG["diffusion"]
 DATASET_CONFIG = CONFIG["dataset"]
@@ -104,7 +115,9 @@ _active_trace: ActiveTrace | None = None
 _trace_lock = threading.Lock()
 _generation_lock = threading.Lock()
 _generation_progress_lock = threading.Lock()
-_active_generation: tuple[str, str] | None = None
+_active_sampling_job: tuple[str, str] | None = None
+_active_judgement_lock = threading.Lock()
+_active_judgements: set[tuple[str, str]] = set()
 
 
 class CreateTraceRequest(BaseModel):
@@ -117,6 +130,12 @@ class CreateGenerationRequest(BaseModel):
     num_samples: int = Field(default=8, ge=1, le=8)
     seed: int = Field(default=42, ge=0, le=4_294_967_295)
     checkpoint: str = Field(default="best-val.pt", min_length=1, max_length=100)
+
+
+class CreateGenerationStudyRequest(BaseModel):
+    num_samples: int = Field(default=100, ge=1, le=1000)
+    seed: int = Field(default=42, ge=0, le=4_294_967_295)
+    checkpoint: str = Field(default="best-val-ema.pt", min_length=1, max_length=100)
 
 
 def atomic_json(path: Path, value: dict[str, object]) -> None:
@@ -162,7 +181,7 @@ def run_generation_job(
     seed: int,
     checkpoint_name: str,
 ) -> None:
-    global _active_generation
+    global _active_sampling_job
     progress_path = output_dir / "progress.json"
     try:
         progress = read_generation_progress(output_dir)
@@ -227,8 +246,202 @@ def run_generation_job(
         write_generation_progress(progress_path, failed)
     finally:
         with _generation_lock:
-            if _active_generation == (run_id, generation_id):
-                _active_generation = None
+            if _active_sampling_job == (run_id, generation_id):
+                _active_sampling_job = None
+
+
+def generation_study_dir(run_dir: Path, study_id: str) -> Path:
+    if not re.fullmatch(r"[0-9a-f]{32}", study_id):
+        raise HTTPException(status_code=404, detail="Generation study not found")
+    path = run_dir / "generation-studies" / study_id
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="Generation study not found")
+    return path
+
+
+def read_study_status(path: Path) -> dict[str, object]:
+    value = read_run_json(path, "status.json", {})
+    return value if isinstance(value, dict) else {}
+
+
+def update_study_status(path: Path, **updates: object) -> dict[str, object]:
+    value = read_study_status(path)
+    value.update(updates, updated_at=datetime.now(UTC).isoformat())
+    atomic_json(path / "status.json", value)
+    return value
+
+
+def run_generation_study_job(
+    run_id: str,
+    study_id: str,
+    checkpoint_path: Path,
+    output_dir: Path,
+    count: int,
+    seed: int,
+    checkpoint_name: str,
+) -> None:
+    global _active_sampling_job
+    try:
+        update_study_status(
+            output_dir,
+            generation_state="running",
+            generation_completed=0,
+            generation_total=count,
+        )
+        reference_count = min(REFERENCE_COUNT, len(validation_images()))
+        if reference_count != REFERENCE_COUNT:
+            raise RuntimeError("The validation split does not contain the fixed 16-image reference set")
+        reference_indices = sorted(
+            np.random.default_rng(42).choice(len(validation_images()), size=reference_count, replace=False).tolist()
+        )
+        reference = torch.stack([validation_images()[index] for index in reference_indices])
+
+        def on_progress(completed: int, total: int) -> None:
+            update_study_status(
+                output_dir,
+                generation_state="running",
+                generation_completed=completed,
+                generation_total=total,
+            )
+
+        metadata = generate_cohort(
+            checkpoint_path,
+            output_dir,
+            count=count,
+            seed=seed,
+            validation_reference_images=reference,
+            validation_reference_selection=f"16 unlabeled validation patches; fixed RNG seed 42; indices {reference_indices}",
+            on_progress=on_progress,
+        )
+        update_study_status(
+            output_dir,
+            generation_state="completed",
+            generation_completed=count,
+            generation_total=count,
+            judgement_state="not_started",
+            judgement_completed=0,
+            judgement_total=count,
+            checkpoint=checkpoint_name,
+            sample_statistics=metadata.get("sample_statistics", {}),
+            sample_value_range=metadata.get("sample_value_range", []),
+            fraction_outside_training_range=metadata.get("fraction_outside_training_range", 0.0),
+        )
+    except Exception as error:
+        update_study_status(
+            output_dir,
+            generation_state="failed",
+            error=f"{type(error).__name__}: {error}",
+        )
+    finally:
+        with _generation_lock:
+            if _active_sampling_job == (run_id, study_id):
+                _active_sampling_job = None
+
+
+def run_judgement_job(run_id: str, study_id: str, output_dir: Path) -> None:
+    key = (run_id, study_id)
+    try:
+        update_study_status(output_dir, judgement_state="running", judgement_error=None)
+        sample_path = output_dir / "samples.pt"
+        if not sample_path.is_file():
+            raise RuntimeError("Saved patch tensors are missing")
+        samples = torch.load(sample_path, map_location="cpu", weights_only=True)
+        metadata = read_run_json(output_dir, "metadata.json", {})
+        if not isinstance(metadata, dict):
+            raise RuntimeError("Generation metadata is unreadable")
+        reference_path = output_dir / "reference.png"
+        if not reference_path.is_file():
+            raise RuntimeError("The fixed EuroSAT validation reference image is missing")
+        reference_sheet = reference_path.read_bytes()
+
+        judgement_path = output_dir / "judgements.json"
+        stored = read_run_json(output_dir, "judgements.json", {})
+        if not isinstance(stored, dict):
+            stored = {}
+        items = stored.get("items", [])
+        batches = stored.get("batches", [])
+        usage = stored.get("usage", {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+        results_by_id = {
+            item["patch_id"]: item
+            for item in items
+            if isinstance(item, dict) and isinstance(item.get("patch_id"), str)
+        } if isinstance(items, list) else {}
+        if not isinstance(batches, list):
+            batches = []
+        if not isinstance(usage, dict):
+            usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+        client = OpenAI()
+        count = int(samples.shape[0])
+        total_batches = (count + JUDGEMENT_BATCH_SIZE - 1) // JUDGEMENT_BATCH_SIZE
+        completed_batches = {
+            int(item["batch_index"])
+            for item in batches
+            if isinstance(item, dict) and isinstance(item.get("batch_index"), int)
+        }
+        update_study_status(
+            output_dir,
+            judgement_state="running",
+            judgement_completed=len(results_by_id),
+            judgement_total=count,
+            judgement_completed_batches=len(completed_batches),
+            judgement_total_batches=total_batches,
+        )
+
+        for batch_index, start in enumerate(range(0, count, JUDGEMENT_BATCH_SIZE)):
+            end = min(start + JUDGEMENT_BATCH_SIZE, count)
+            expected_ids = [f"patch-{index + 1:04d}" for index in range(start, end)]
+            if all(patch_id in results_by_id for patch_id in expected_ids):
+                continue
+            update_study_status(
+                output_dir,
+                judgement_state="running",
+                judgement_current_batch=batch_index + 1,
+                judgement_total_batches=total_batches,
+            )
+            batch_results, batch_usage = judge_batch(
+                client,
+                patch_ids=expected_ids,
+                images=samples[start:end],
+                reference_sheet=reference_sheet,
+            )
+            for result in batch_results:
+                results_by_id[result["patch_id"]] = result
+            if batch_index not in completed_batches:
+                batches.append({"batch_index": batch_index, "patch_ids": expected_ids})
+                completed_batches.add(batch_index)
+            for name in ("input_tokens", "output_tokens", "total_tokens"):
+                usage[name] = int(usage.get(name, 0)) + int(batch_usage[name])
+            ordered = [results_by_id[f"patch-{index + 1:04d}"] for index in range(count) if f"patch-{index + 1:04d}" in results_by_id]
+            atomic_json(judgement_path, {"items": ordered, "batches": batches, "usage": usage})
+            update_study_status(
+                output_dir,
+                judgement_state="running",
+                judgement_completed=len(results_by_id),
+                judgement_completed_batches=len(completed_batches),
+                judgement_total_batches=total_batches,
+            )
+
+        ordered = [results_by_id[f"patch-{index + 1:04d}"] for index in range(count)]
+        report = build_judgement_report(ordered, metadata)
+        report["usage"] = usage
+        atomic_json(output_dir / "judgement-report.json", report)
+        update_study_status(
+            output_dir,
+            judgement_state="completed",
+            judgement_completed=count,
+            judgement_completed_batches=total_batches,
+            judgement_total_batches=total_batches,
+        )
+    except Exception as error:
+        update_study_status(
+            output_dir,
+            judgement_state="failed",
+            judgement_error=f"Judging stopped ({type(error).__name__}). Completed batches are saved; retry to resume.",
+        )
+    finally:
+        with _active_judgement_lock:
+            _active_judgements.discard(key)
 
 
 @app.get("/api/health")
@@ -335,7 +548,7 @@ def create_generation(
     request: CreateGenerationRequest,
     background_tasks: BackgroundTasks,
 ) -> dict[str, str | int]:
-    global _active_generation
+    global _active_sampling_job
     run_dir = get_run_dir(run_id)
     status = read_run_json(run_dir, "status.json", {})
     manifest = read_run_json(run_dir, "checkpoint_manifest.json", [])
@@ -356,7 +569,7 @@ def create_generation(
         raise HTTPException(status_code=409, detail="This run has no completed best-validation checkpoint")
 
     with _generation_lock:
-        if _active_generation is not None:
+        if _active_sampling_job is not None:
             raise HTTPException(status_code=409, detail="A generation is already running")
         generation_id = uuid4().hex
         output_dir = run_dir / "generation" / generation_id
@@ -375,7 +588,7 @@ def create_generation(
             "frame_stride": LIVE_FRAME_STRIDE,
         }
         write_generation_progress(output_dir / "progress.json", initial)
-        _active_generation = (run_id, generation_id)
+        _active_sampling_job = (run_id, generation_id)
         background_tasks.add_task(
             run_generation_job,
             run_id,
@@ -396,10 +609,198 @@ def get_generation(run_id: str, generation_id: str) -> dict[str, object]:
     progress = read_generation_progress(output_dir)
     if progress.get("state") in {"queued", "running"}:
         with _generation_lock:
-            is_active = _active_generation == (run_id, generation_id)
+            is_active = _active_sampling_job == (run_id, generation_id)
         if not is_active:
             progress.update(state="interrupted", error="The API stopped before generation completed")
     return progress
+
+
+@app.get("/api/runs/{run_id}/generation-studies")
+def list_generation_studies(run_id: str) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    root = run_dir / "generation-studies"
+    items: list[dict[str, object]] = []
+    if root.is_dir():
+        for path in root.iterdir():
+            if not path.is_dir():
+                continue
+            status = read_study_status(path)
+            items.append({
+                "study_id": path.name,
+                "run_id": run_id,
+                "created_at": status.get("created_at"),
+                "generation_state": status.get("generation_state"),
+                "generation_completed": status.get("generation_completed", 0),
+                "generation_total": status.get("generation_total", 0),
+                "judgement_state": status.get("judgement_state"),
+                "judgement_completed": status.get("judgement_completed", 0),
+                "judgement_total": status.get("judgement_total", 0),
+                "num_samples": status.get("num_samples"),
+                "seed": status.get("seed"),
+                "checkpoint": status.get("checkpoint"),
+                "can_judge": bool(os.environ.get("OPENAI_API_KEY")),
+            })
+    items.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    return {"items": items}
+
+
+@app.post("/api/runs/{run_id}/generation-studies", status_code=202)
+def create_generation_study(
+    run_id: str,
+    request: CreateGenerationStudyRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str | int]:
+    global _active_sampling_job
+    run_dir = get_run_dir(run_id)
+    status = read_run_json(run_dir, "status.json", {})
+    manifest = read_run_json(run_dir, "checkpoint_manifest.json", [])
+    available = {
+        item.get("name")
+        for item in manifest
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    } if isinstance(manifest, list) else set()
+    if request.checkpoint not in available or Path(request.checkpoint).name != request.checkpoint:
+        raise HTTPException(status_code=404, detail="Checkpoint not found in this run")
+    checkpoint_path = run_dir / "checkpoints" / request.checkpoint
+    if (
+        not isinstance(status, dict)
+        or status.get("state") != "completed"
+        or status.get("mode") != "train"
+        or not checkpoint_path.is_file()
+    ):
+        raise HTTPException(status_code=409, detail="This run has no completed training checkpoint")
+
+    with _generation_lock:
+        if _active_sampling_job is not None:
+            raise HTTPException(status_code=409, detail="Another sampling job is already running")
+        study_id = uuid4().hex
+        output_dir = run_dir / "generation-studies" / study_id
+        output_dir.mkdir(parents=True, exist_ok=False)
+        initial = {
+            "run_id": run_id,
+            "created_at": datetime.now(UTC).isoformat(),
+            "generation_state": "queued",
+            "generation_completed": 0,
+            "generation_total": request.num_samples,
+            "judgement_state": "not_started",
+            "judgement_completed": 0,
+            "judgement_total": request.num_samples,
+            "judgement_batch_size": JUDGEMENT_BATCH_SIZE,
+            "generation_chunk_size": GENERATION_CHUNK_SIZE,
+            "seed": request.seed,
+            "num_samples": request.num_samples,
+            "checkpoint": request.checkpoint,
+            "can_judge": bool(os.environ.get("OPENAI_API_KEY")),
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+        atomic_json(output_dir / "status.json", initial)
+        _active_sampling_job = (run_id, study_id)
+        background_tasks.add_task(
+            run_generation_study_job,
+            run_id,
+            study_id,
+            checkpoint_path,
+            output_dir,
+            request.num_samples,
+            request.seed,
+            request.checkpoint,
+        )
+    return {"study_id": study_id, "run_id": run_id, "generation_state": "queued"}
+
+
+@app.get("/api/runs/{run_id}/generation-studies/{study_id}")
+def get_generation_study(run_id: str, study_id: str) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_study_dir(run_dir, study_id)
+    status = read_study_status(output_dir)
+    if status.get("generation_state") in {"queued", "running"}:
+        with _generation_lock:
+            is_active = _active_sampling_job == (run_id, study_id)
+        if not is_active:
+            status = update_study_status(
+                output_dir,
+                generation_state="interrupted",
+                error="The API stopped before cohort generation completed",
+            )
+    if status.get("judgement_state") in {"queued", "running"}:
+        with _active_judgement_lock:
+            is_active = (run_id, study_id) in _active_judgements
+        if not is_active:
+            status = update_study_status(
+                output_dir,
+                judgement_state="failed",
+                judgement_error="Judging was interrupted; retry to resume saved batches.",
+            )
+    status["study_id"] = study_id
+    status["can_judge"] = bool(os.environ.get("OPENAI_API_KEY"))
+    return status
+
+
+@app.get("/api/runs/{run_id}/generation-studies/{study_id}/samples.png")
+def get_generation_study_grid(run_id: str, study_id: str) -> FileResponse:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_study_dir(run_dir, study_id)
+    status = read_study_status(output_dir)
+    if status.get("generation_state") != "completed":
+        raise HTTPException(status_code=409, detail="The generated cohort is not ready")
+    path = output_dir / "samples.png"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated cohort grid not found")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/runs/{run_id}/generation-studies/{study_id}/samples/{sample_index}.png")
+def get_generation_study_patch(run_id: str, study_id: str, sample_index: int) -> FileResponse:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_study_dir(run_dir, study_id)
+    status = read_study_status(output_dir)
+    count = int(status.get("num_samples", 0))
+    if status.get("generation_state") != "completed" or not 0 <= sample_index < count:
+        raise HTTPException(status_code=404, detail="Generated patch not found")
+    path = output_dir / "patches" / f"patch-{sample_index + 1:04d}.png"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Generated patch not found")
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/runs/{run_id}/generation-studies/{study_id}/judgements", status_code=202)
+def start_generation_study_judgement(
+    run_id: str,
+    study_id: str,
+    background_tasks: BackgroundTasks,
+) -> dict[str, str]:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_study_dir(run_dir, study_id)
+    status = read_study_status(output_dir)
+    if status.get("generation_state") != "completed":
+        raise HTTPException(status_code=409, detail="Generate and review the cohort before judging it")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not available to the API process")
+    if status.get("judgement_state") == "completed":
+        raise HTTPException(status_code=409, detail="This cohort has already been judged")
+
+    key = (run_id, study_id)
+    with _active_judgement_lock:
+        if _active_judgements:
+            if key in _active_judgements:
+                raise HTTPException(status_code=409, detail="Judging is already running for this cohort")
+            raise HTTPException(status_code=409, detail="Another cohort is currently being judged")
+        _active_judgements.add(key)
+    update_study_status(output_dir, judgement_state="queued", judgement_error=None)
+    background_tasks.add_task(run_judgement_job, run_id, study_id, output_dir)
+    return {"study_id": study_id, "judgement_state": "queued"}
+
+
+@app.get("/api/runs/{run_id}/generation-studies/{study_id}/judgements")
+def get_generation_study_judgements(run_id: str, study_id: str) -> dict[str, object]:
+    run_dir = get_run_dir(run_id)
+    output_dir = generation_study_dir(run_dir, study_id)
+    values = read_run_json(output_dir, "judgements.json", {})
+    report = read_run_json(output_dir, "judgement-report.json", {})
+    return {
+        "items": values.get("items", []) if isinstance(values, dict) else [],
+        "report": report if isinstance(report, dict) else {},
+    }
 
 
 @app.get("/api/runs/{run_id}/generations/{generation_id}/frames/{frame_index}")
