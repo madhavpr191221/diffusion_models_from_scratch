@@ -1,0 +1,50 @@
+# Practical continuous-time VP-SDE score-model run, matched to the original
+# DDPM 50-epoch recipe except for the diffusion process and time parameterization.
+process = "vp_sde"
+seed = 42
+image_size = 64
+image_channels = 3
+normalization_min = -1.0
+normalization_max = 1.0
+
+[dataset]
+repository = "blanchon/EuroSAT_RGB"
+revision = "655ef66ef2be07f89aec61407f24c772802eb87d"
+cache_dir = "data/huggingface"
+train_split = "train"
+validation_split = "validation"
+test_split = "test"
+
+[vp_sde]
+beta_min = 0.1
+beta_max = 20.0
+training_time_min = 0.00001
+sampling_steps = 1000
+
+[model]
+architecture = "vp_sde_ddpm_cifar_v1"
+base_channels = 128
+channel_multipliers = [1, 2, 2, 2]
+residual_blocks_per_level = 2
+attention_resolutions = [16]
+dropout = 0.1
+time_embedding = "continuous_fourier"
+prediction = "epsilon"
+
+[training]
+target_updates = 6350
+pilot_updates = 50
+effective_batch_size = 128
+micro_batch_size = 16
+learning_rate = 0.0002
+optimizer = "adam"
+warmup_updates = 40
+gradient_clip = 1.0
+ema_decay = 0.999
+horizontal_flip = true
+validation_images = 512
+validation_every_updates = 635
+monitor_interval_updates = 100
+status_interval_updates = 10
+checkpoint_every_updates = 127
+model_checkpoint_every_updates = 1270

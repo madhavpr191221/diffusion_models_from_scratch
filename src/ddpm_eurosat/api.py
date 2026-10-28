@@ -36,6 +36,7 @@ from ddpm_eurosat.generation_evaluation import (
     judge_batch,
 )
 from ddpm_eurosat.sampling import LIVE_FRAME_STRIDE, choose_device, display_grid, generate_from_checkpoint
+from ddpm_eurosat.score_sde_sampling import generate_from_checkpoint as generate_from_vp_sde_checkpoint
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(PROJECT_ROOT / ".env", override=False)
@@ -69,6 +70,17 @@ def read_run_json(run_dir: Path, filename: str, default: object) -> object:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise HTTPException(status_code=500, detail=f"Run artifact {filename} is unreadable") from error
+
+
+def run_process(run_config: object) -> str:
+    """Read the process from run metadata; older configs are discrete DDPMs."""
+    if not isinstance(run_config, dict):
+        return "ddpm"
+    config = run_config.get("config", {})
+    if not isinstance(config, dict):
+        return "ddpm"
+    process = config.get("process", "ddpm")
+    return process if isinstance(process, str) else "ddpm"
 
 
 @lru_cache(maxsize=1)
@@ -130,6 +142,7 @@ class CreateGenerationRequest(BaseModel):
     num_samples: int = Field(default=8, ge=1, le=8)
     seed: int = Field(default=42, ge=0, le=4_294_967_295)
     checkpoint: str = Field(default="best-val.pt", min_length=1, max_length=100)
+    sampler: Literal["reverse_sde", "annealed_langevin"] = "reverse_sde"
 
 
 class CreateGenerationStudyRequest(BaseModel):
@@ -180,6 +193,8 @@ def run_generation_job(
     num_samples: int,
     seed: int,
     checkpoint_name: str,
+    process: str,
+    sampler: str = "reverse_sde",
 ) -> None:
     global _active_sampling_job
     progress_path = output_dir / "progress.json"
@@ -191,43 +206,82 @@ def run_generation_job(
         progress["checkpoint"] = checkpoint_name
         write_generation_progress(progress_path, progress)
 
-        def publish_frame(frame_index: int, timestep: int, image: torch.Tensor) -> None:
+        def publish_ddpm_frame(frame_index: int, timestep: int, image: torch.Tensor) -> None:
             frames_dir = output_dir / "frames"
             frames_dir.mkdir(parents=True, exist_ok=True)
             frame_path = frames_dir / f"frame-{frame_index:05d}.png"
             display_grid(image.unsqueeze(0), frame_path, columns=1)
             progress.update(
                 state="running",
+                process="ddpm",
                 completed_steps=min(frame_index * LIVE_FRAME_STRIDE, SCHEDULE.timesteps),
+                total_steps=SCHEDULE.timesteps,
                 current_timestep=timestep,
                 latest_frame_index=frame_index,
                 updated_at=datetime.now(UTC).isoformat(),
             )
             write_generation_progress(progress_path, progress)
 
-        schedule_steps = SCHEDULE.timesteps
+        def publish_sde_frame(frame_index: int, step: int, current_time: float, image: torch.Tensor) -> None:
+            frames_dir = output_dir / "frames"
+            frames_dir.mkdir(parents=True, exist_ok=True)
+            frame_path = frames_dir / f"frame-{frame_index:05d}.png"
+            display_grid(image.unsqueeze(0), frame_path, columns=1)
+            progress.update(
+                state="running",
+                process="vp_sde",
+                completed_steps=step,
+                total_steps=int(progress.get("total_steps", 1000)),
+                current_t=current_time,
+                latest_frame_index=frame_index,
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+            write_generation_progress(progress_path, progress)
+
         device = choose_device("auto")
         reference_count = min(128, len(validation_images()))
         reference = torch.stack([validation_images()[index] for index in range(reference_count)])
-        metadata = generate_from_checkpoint(
-            checkpoint_path,
-            output_dir,
-            num_samples=num_samples,
-            seed=seed,
-            device_name=str(device),
-            on_frame=publish_frame,
-            validation_reference_images=reference,
-        )
+        if process == "vp_sde":
+            run_config = read_run_json(get_run_dir(run_id), "config.json", {})
+            wrapped = run_config.get("config", {}) if isinstance(run_config, dict) else {}
+            sde_steps = int(wrapped.get("vp_sde", {}).get("sampling_steps", 1000)) if isinstance(wrapped, dict) else 1000
+            progress["total_steps"] = 1000 if sampler == "annealed_langevin" else sde_steps
+            progress["sampler"] = sampler
+            write_generation_progress(progress_path, progress)
+            metadata = generate_from_vp_sde_checkpoint(
+                checkpoint_path, output_dir, num_samples=num_samples, seed=seed,
+                device_name=str(device), on_frame=publish_sde_frame,
+                validation_reference_images=reference,
+                validation_reference_selection="first 128 validation images by split index (or full split if smaller)",
+                sampling_steps=sde_steps,
+                sampler=sampler,
+            )
+            schedule_steps = 1000 if sampler == "annealed_langevin" else sde_steps
+            if sampler == "annealed_langevin":
+                completed_time: float | None = float(wrapped.get("vp_sde", {}).get("training_time_min", 1e-5))
+            else:
+                completed_time = 0.0
+        else:
+            metadata = generate_from_checkpoint(
+                checkpoint_path, output_dir, num_samples=num_samples, seed=seed,
+                device_name=str(device), on_frame=publish_ddpm_frame,
+                validation_reference_images=reference,
+            )
+            schedule_steps = SCHEDULE.timesteps
+            completed_time = None
         completed = {
             "generation_id": generation_id,
             "run_id": run_id,
             "state": "completed",
+            "process": process,
+            "sampler": sampler,
             "num_samples": num_samples,
             "seed": seed,
             "checkpoint": checkpoint_name,
             "total_steps": schedule_steps,
             "completed_steps": schedule_steps,
             "current_timestep": 0,
+            "current_t": completed_time,
             "latest_frame_index": schedule_steps // LIVE_FRAME_STRIDE,
             "frame_stride": LIVE_FRAME_STRIDE,
             "updated_at": datetime.now(UTC).isoformat(),
@@ -474,11 +528,20 @@ def list_runs() -> dict[str, list[dict[str, object]]]:
             run_config = read_run_json(run_dir, "config.json", {})
             if not isinstance(status, dict) or not isinstance(run_config, dict):
                 continue
+            process = run_process(run_config)
+            generation_checkpoint = "best-val-ema.pt" if process == "vp_sde" else "best-val.pt"
             items.append(
                 {
                     "run_id": run_dir.name,
                     "state": status.get("state", "unknown"),
                     "mode": status.get("mode", "train"),
+                    "process": process,
+                    "prediction": (
+                        run_config.get("config", {}).get("model", {}).get("prediction")
+                        if isinstance(run_config.get("config"), dict)
+                        and isinstance(run_config.get("config", {}).get("model"), dict)
+                        else "epsilon"
+                    ),
                     "global_step": status.get("global_step", 0),
                     "epoch": status.get("epoch", 0),
                     "total_epochs": status.get("total_epochs", 0),
@@ -487,7 +550,7 @@ def list_runs() -> dict[str, list[dict[str, object]]]:
                     "can_generate": (
                         status.get("state") == "completed"
                         and status.get("mode") == "train"
-                        and (run_dir / "checkpoints" / "best-val.pt").is_file()
+                        and (run_dir / "checkpoints" / generation_checkpoint).is_file()
                     ),
                 }
             )
@@ -550,6 +613,18 @@ def create_generation(
 ) -> dict[str, str | int]:
     global _active_sampling_job
     run_dir = get_run_dir(run_id)
+    run_config = read_run_json(run_dir, "config.json", {})
+    process = run_process(run_config)
+    saved_config = run_config.get("config", {}) if isinstance(run_config, dict) else {}
+    process_steps = (
+        int(saved_config.get("vp_sde", {}).get("sampling_steps", 1000))
+        if process == "vp_sde" and isinstance(saved_config, dict)
+        else SCHEDULE.timesteps
+    )
+    if process == "vp_sde" and request.sampler == "annealed_langevin":
+        process_steps = 1000  # 100 noise levels x 10 Langevin updates per level
+    elif process != "vp_sde" and request.sampler != "reverse_sde":
+        raise HTTPException(status_code=422, detail="Annealed Langevin is available only for VP-SDE runs")
     status = read_run_json(run_dir, "status.json", {})
     manifest = read_run_json(run_dir, "checkpoint_manifest.json", [])
     available = {
@@ -578,12 +653,15 @@ def create_generation(
             "generation_id": generation_id,
             "run_id": run_id,
             "state": "queued",
+            "process": process,
+            "sampler": request.sampler,
             "num_samples": request.num_samples,
             "seed": request.seed,
             "checkpoint": request.checkpoint,
-            "total_steps": SCHEDULE.timesteps,
+            "total_steps": process_steps,
             "completed_steps": 0,
             "current_timestep": SCHEDULE.timesteps,
+            "current_t": 1.0 if process == "vp_sde" else None,
             "latest_frame_index": -1,
             "frame_stride": LIVE_FRAME_STRIDE,
         }
@@ -598,6 +676,8 @@ def create_generation(
             request.num_samples,
             request.seed,
             request.checkpoint,
+            process,
+            request.sampler,
         )
     return {"generation_id": generation_id, "run_id": run_id, "state": "queued"}
 
@@ -652,6 +732,11 @@ def create_generation_study(
 ) -> dict[str, str | int]:
     global _active_sampling_job
     run_dir = get_run_dir(run_id)
+    if run_process(read_run_json(run_dir, "config.json", {})) == "vp_sde":
+        raise HTTPException(
+            status_code=409,
+            detail="VP-SDE cohort generation and VLM judgment are not enabled in this workflow.",
+        )
     status = read_run_json(run_dir, "status.json", {})
     manifest = read_run_json(run_dir, "checkpoint_manifest.json", [])
     available = {
@@ -814,11 +899,28 @@ def get_generation_frame(run_id: str, generation_id: str, frame_index: int) -> R
     frame_path = output_dir / "frames" / f"frame-{frame_index:05d}.png"
     if not frame_path.is_file():
         raise HTTPException(status_code=404, detail="Denoising frame not found")
-    timestep = max(SCHEDULE.timesteps - frame_index * LIVE_FRAME_STRIDE, 0)
+    process = str(progress.get("process", run_process(read_run_json(run_dir, "config.json", {}))))
+    headers = {"X-Process": process, "Cache-Control": "no-store"}
+    if process == "vp_sde":
+        total_steps = max(int(progress.get("total_steps", 1000)), 1)
+        if progress.get("sampler") == "annealed_langevin":
+            run_config = read_run_json(run_dir, "config.json", {})
+            wrapped = run_config.get("config", {}) if isinstance(run_config, dict) else {}
+            time_min = float(wrapped.get("vp_sde", {}).get("training_time_min", 1e-5)) if isinstance(wrapped, dict) else 1e-5
+            current_time = (
+                1.0 if frame_index == 0
+                else 1.0 - ((frame_index - 1) / max(total_steps // LIVE_FRAME_STRIDE - 1, 1)) * (1.0 - time_min)
+            )
+        else:
+            current_time = max(1.0 - frame_index * LIVE_FRAME_STRIDE / total_steps, 0.0)
+        headers["X-Time"] = f"{current_time:.8f}"
+    else:
+        timestep = max(SCHEDULE.timesteps - frame_index * LIVE_FRAME_STRIDE, 0)
+        headers["X-Timestep"] = str(timestep)
     return FileResponse(
         frame_path,
         media_type="image/png",
-        headers={"X-Timestep": str(timestep), "Cache-Control": "no-store"},
+        headers=headers,
     )
 
 

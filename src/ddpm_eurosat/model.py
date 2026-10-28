@@ -282,14 +282,20 @@ class OriginalDDPMUNet(nn.Module):
         if x_t.device != t.device or x_t.device != self.input_conv.weight.device:
             raise ValueError("x_t, t, and model must be on the same device")
 
+        time_embedding = self._embed_time_positions(t.to(torch.float32))
+        return self._forward_with_time_embedding(x_t, time_embedding)
+
+    def _embed_time_positions(self, positions: Tensor) -> Tensor:
+        """Embed numeric time positions with the original DDPM Fourier features."""
         half_dim = self.base_channels // 2
-        frequency_exponents = torch.arange(half_dim, device=t.device, dtype=torch.float32)
+        frequency_exponents = torch.arange(half_dim, device=positions.device, dtype=torch.float32)
         frequencies = torch.exp(-math.log(10_000.0) * frequency_exponents / (half_dim - 1))
-        angles = t.to(torch.float32).unsqueeze(1) * frequencies.unsqueeze(0)
+        angles = positions.unsqueeze(1) * frequencies.unsqueeze(0)
         time_embedding = torch.cat((torch.sin(angles), torch.cos(angles)), dim=1)
         time_embedding = self.time_mlp[0](time_embedding)
-        time_embedding = self.time_mlp[1](F.silu(time_embedding))
+        return self.time_mlp[1](F.silu(time_embedding))
 
+    def _forward_with_time_embedding(self, x_t: Tensor, time_embedding: Tensor) -> Tensor:
         hidden = self.input_conv(x_t)
         skips = [hidden]
         for level in self.down_levels:
@@ -317,12 +323,52 @@ class OriginalDDPMUNet(nn.Module):
         return self.output_conv(F.silu(self.output_norm(hidden)))
 
 
+class ContinuousTimeOriginalDDPMUNet(OriginalDDPMUNet):
+    """Original DDPM U-Net parameterized by continuous VP-SDE time.
+
+    This subclass adds no learned parameters. It maps ``t in [0,1]`` to the
+    original sinusoidal embedding's ``[0,999]`` phase range, then uses exactly
+    the same U-Net backbone and time MLP. Its output is predicted epsilon.
+    """
+
+    def forward(self, x_t: Tensor, t: Tensor) -> Tensor:
+        if x_t.ndim != 4 or tuple(x_t.shape[1:]) != self.image_shape:
+            raise ValueError(f"x_t must have shape [B,3,64,64], received {tuple(x_t.shape)}")
+        if not x_t.is_floating_point():
+            raise TypeError(f"x_t must be floating point, received {x_t.dtype}")
+        if t.shape != (x_t.shape[0],):
+            raise ValueError(f"t must have shape [{x_t.shape[0]}], received {tuple(t.shape)}")
+        if not t.is_floating_point():
+            raise TypeError(f"t must be floating point, received {t.dtype}")
+        if x_t.device != t.device or x_t.device != self.input_conv.weight.device:
+            raise ValueError("x_t, t, and model must be on the same device")
+
+        # Continuous normalized SDE time shares the original model's 0..999
+        # Fourier phase range without changing discrete integer-time behavior.
+        positions = t.to(torch.float32) * 999.0
+        time_embedding = self._embed_time_positions(positions)
+        return self._forward_with_time_embedding(x_t, time_embedding)
+
+
+class ContinuousTimeDirectScoreUNet(ContinuousTimeOriginalDDPMUNet):
+    """Same continuous-time U-Net, trained to emit the DSM score directly.
+
+    The tensor shape and learned architecture match the epsilon model. The
+    output meaning is recorded in the run config: this model predicts
+    ``-epsilon / sigma(t)`` rather than epsilon.
+    """
+
+
 def build_model(config: dict | None = None) -> nn.Module:
     """Construct a model from saved configuration; absent IDs mean legacy compact U-Net."""
     model_config = (config or {}).get("model", {})
     architecture = model_config.get("architecture", "compact_v1")
     if architecture == "ddpm_cifar_v1":
         return OriginalDDPMUNet(dropout=float(model_config.get("dropout", 0.1)))
+    if architecture == "vp_sde_ddpm_cifar_v1":
+        return ContinuousTimeOriginalDDPMUNet(dropout=float(model_config.get("dropout", 0.1)))
+    if architecture == "vp_sde_direct_score_ddpm_cifar_v1":
+        return ContinuousTimeDirectScoreUNet(dropout=float(model_config.get("dropout", 0.1)))
     if architecture == "compact_v1":
         return TimeConditionedUNet()
     raise ValueError(f"Unknown model architecture: {architecture}")

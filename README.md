@@ -108,3 +108,16 @@ uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_original_d
 ```
 
 The 800,000-update configuration in `configs/eurosat_original_ddpm.toml` is a paper-scale reference, not the recommended EuroSAT run; the GPU pilot projected roughly 18 days. The practical run saves resumable state every epoch in `runs/<run-id>/checkpoints/latest.pt`. It validates every five epochs, saves best raw and EMA checkpoints, and never loads the test split. Follow progress in the existing React Training monitor and use the EMA checkpoint in Generate after validation selects it.
+
+## VP-SDE direct-score model and Langevin sampling
+
+The VP-SDE trainer supports two output parameterizations with the same continuous-time U-Net capacity: the existing epsilon predictor and a separate model trained to predict the score directly. The direct-score model uses the conditional target `-epsilon/sigma(t)` and sigma-squared-weighted DSM. This loss is algebraically equal to epsilon MSE, but the network output itself is a score. The direct-score run uses the same EuroSAT train split, validation selection, normalization, seed, and 50-epoch budget; the test split is not loaded.
+
+Run its pilot and, after reviewing it, the full training job:
+
+```powershell
+uv run --locked python -m ddpm_eurosat.score_sde_train --config configs/eurosat_vp_sde_direct_score_50_epoch.toml --pilot --device cuda
+uv run --locked python -m ddpm_eurosat.score_sde_train --config configs/eurosat_vp_sde_direct_score_50_epoch.toml --device cuda
+```
+
+In **Training monitor**, the run is identified as a direct-score VP-SDE run. In **Generate**, select that run and its `best-val-ema.pt` checkpoint. Advanced settings provide **Reverse VP-SDE** (Euler–Maruyama) and **Annealed Langevin dynamics**. Langevin starts from seeded Gaussian noise and performs 10 score updates at each of 100 descending VP noise levels, using `eta(t)=2e-5*sigma(t)^2/sigma(1)^2`; the UI saves and animates the 1,001 states. The same Langevin sampler can also use an epsilon checkpoint, converting its output explicitly via `score=-epsilon/sigma(t)`. Both samplers report 1,000 network evaluations at the default settings. The trajectory and sampler settings are saved with each generation artifact.

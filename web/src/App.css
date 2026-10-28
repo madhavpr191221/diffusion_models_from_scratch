@@ -101,6 +101,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .run-state-line { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .run-state-line > div { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .run-state-line h2 { overflow: hidden; margin: 0; color: var(--text); font: 500 16px var(--mono); text-overflow: ellipsis; }
+.run-state-line small { color: var(--faint); font: 9px var(--mono); }
 .state-badge { padding: 5px 9px; color: var(--muted); border: 1px solid var(--border); border-radius: 3px; font: 9px var(--mono); text-transform: uppercase; }
 .state-running { color: var(--green); border-color: #596d45; background: #20291e; }
 .state-completed { color: #a9d5c3; border-color: #39564c; background: #19251f; }
@@ -177,6 +178,7 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .generation-run, .generation-number { display: flex; flex-direction: column; gap: 7px; min-width: 0; color: var(--muted); font-size: 11px; }
 .generation-run select, .generation-number input { width: 100%; min-width: 0; padding: 10px; color: var(--text); background: #141a16; border: 1px solid var(--border); border-radius: 3px; font: 11px var(--mono); }
 .generation-run small { color: var(--faint); font-size: 9px; }
+.model-family-picker { max-width: 560px; margin: 0 0 15px; }
 .generation-number small { color: var(--faint); font-size: 9px; line-height: 1.4; }
 .generation-run code { color: var(--green); font: 9px var(--mono); }
 .generation-diagnostic { margin: 11px auto 0; max-width: 760px; color: var(--muted); font-size: 11px; line-height: 1.6; text-align: center; }

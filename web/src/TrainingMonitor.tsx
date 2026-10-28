@@ -1,13 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { getModelProfile, MODEL_PROFILES, resolveTrainingRun, type ModelFamily, type ModelRun } from './modelChoices'
 
-type RunSummary = {
-  run_id: string
-  state: string
-  mode: string
+type RunSummary = ModelRun & {
   global_step: number
   epoch: number
   total_epochs: number
-  created_at: string | null
 }
 type MetricEvent = {
   event_id: number
@@ -42,9 +39,12 @@ type Checkpoint = {
   saved_at: string
 }
 type ResolvedConfig = {
+  process?: string
   seed?: number
-  training?: { batch_size?: number; effective_batch_size?: number; micro_batch_size?: number; epochs?: number; learning_rate?: number; optimizer?: string }
+  model?: { prediction?: 'epsilon' | 'score'; architecture?: string }
+  training?: { batch_size?: number; effective_batch_size?: number; micro_batch_size?: number; epochs?: number; learning_rate?: number; optimizer?: string; validation_every_updates?: number; monitor_interval_updates?: number }
   diffusion?: { timesteps?: number }
+  vp_sde?: { beta_min?: number; beta_max?: number; training_time_min?: number }
 }
 
 async function getJson<T>(url: string): Promise<T> {
@@ -53,7 +53,7 @@ async function getJson<T>(url: string): Promise<T> {
   return (await response.json()) as T
 }
 
-function LossChart({ events }: { events: MetricEvent[] }) {
+function LossChart({ events, windowUpdates, label }: { events: MetricEvent[]; windowUpdates: number; label: string }) {
   const latestByStep = new Map<string, MetricEvent>()
   for (const event of events) latestByStep.set(`${event.kind}:${event.global_step}`, event)
   const currentEvents = [...latestByStep.values()].sort((first, second) => first.global_step - second.global_step)
@@ -85,7 +85,7 @@ function LossChart({ events }: { events: MetricEvent[] }) {
 
   return (
     <div className="loss-chart-wrap">
-      <svg className="loss-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Training noise-prediction loss and validation loss by optimizer update">
+      <svg className="loss-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={`${label} and validation loss by optimizer update`}>
         <line x1={left} y1={top} x2={left} y2={height - bottom} className="chart-axis" />
         <line x1={left} y1={height - bottom} x2={width - right} y2={height - bottom} className="chart-axis" />
         <text x="8" y={top + 5} className="chart-label">MSE</text>
@@ -96,7 +96,7 @@ function LossChart({ events }: { events: MetricEvent[] }) {
         {validation.map((event) => <circle key={event.event_id} cx={x(event.global_step)} cy={y(event.loss)} r="4.5" className="chart-validation" />)}
         {emaValidation.map((event) => <rect key={`ema-${event.event_id}`} x={x(event.global_step) - 4} y={y(event.ema_loss as number) - 4} width="8" height="8" className="chart-validation-ema" />)}
       </svg>
-      <div className="chart-legend"><span><i className="legend-raw" />100-update mean loss</span><span><i className="legend-smooth" />Smoothed monitor curve</span><span><i className="legend-validation" />Raw validation loss</span><span><i className="legend-validation-ema" />EMA validation loss</span></div>
+      <div className="chart-legend"><span><i className="legend-raw" />Up to {windowUpdates}-update mean loss</span><span><i className="legend-smooth" />Smoothed monitor curve</span><span><i className="legend-validation" />Raw validation loss</span><span><i className="legend-validation-ema" />EMA validation loss</span></div>
       <div className="chart-range"><span>{minLoss.toFixed(4)}</span><span>{maxLoss.toFixed(4)}</span></div>
     </div>
   )
@@ -110,13 +110,16 @@ function formatDuration(seconds?: number) {
 
 export default function TrainingMonitor() {
   const [runs, setRuns] = useState<RunSummary[]>([])
-  const [selectedRunId, setSelectedRunId] = useState('')
+  const [modelFamily, setModelFamily] = useState<ModelFamily>('ddpm')
   const [status, setStatus] = useState<RunStatus | null>(null)
   const [events, setEvents] = useState<MetricEvent[]>([])
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const [resolvedConfig, setResolvedConfig] = useState<ResolvedConfig | null>(null)
   const [error, setError] = useState<string | null>(null)
   const cursor = useRef(0)
+  const selectedRun = resolveTrainingRun(runs, modelFamily)
+  const selectedRunId = selectedRun?.run_id ?? ''
+  const modelProfile = getModelProfile(modelFamily)
 
   useEffect(() => {
     let stopped = false
@@ -128,7 +131,6 @@ export default function TrainingMonitor() {
         const result = await getJson<{ items: RunSummary[] }>('/api/runs')
         if (!stopped) {
           setRuns(result.items)
-          setSelectedRunId((current) => current && result.items.some((run) => run.run_id === current) ? current : result.items[0]?.run_id ?? '')
           setError(null)
         }
       } catch (reason) {
@@ -183,7 +185,20 @@ export default function TrainingMonitor() {
     if (!status?.planned_steps) return 0
     return Math.min(100, (100 * (status.global_step ?? 0)) / status.planned_steps)
   }, [status])
-  const selected = runs.find((run) => run.run_id === selectedRunId)
+  const selectedCheckpoint = checkpoints.find((checkpoint) => checkpoint.name === modelProfile.checkpoint)
+  const isVpSde = resolvedConfig?.process === 'vp_sde'
+  const isDirectScore = isVpSde && resolvedConfig?.model?.prediction === 'score'
+  const lossTitle = isVpSde ? isDirectScore ? 'Weighted direct-score DSM' : 'Weighted DSM / epsilon MSE' : 'Noise-prediction loss'
+  const monitorWindow = resolvedConfig?.training?.monitor_interval_updates ?? 100
+  const validationInterval = resolvedConfig?.training?.validation_every_updates
+  const validationCadence = validationInterval
+    ? `Validation uses a fixed corruption set every ${validationInterval.toLocaleString()} updates.`
+    : 'Validation cadence is recorded in the run config.'
+  const lossDescription = isVpSde
+    ? isDirectScore
+      ? `The U-Net predicts the score directly and is trained against -epsilon/sigma(t), with sigma(t)^2 weighting. This is algebraically equal to epsilon MSE, but the model output is a score vector. ${validationCadence}`
+      : `The U-Net predicts sampled epsilon. Its epsilon MSE is exactly the sigma-squared-weighted conditional DSM objective; sampling converts it by score = -epsilon/sigma(t). ${validationCadence}`
+    : `Training minimizes mean squared error between the sampled noise and the U-Net prediction. ${validationCadence}`
 
   return (
     <section className="training-view" aria-label="Training monitor">
@@ -193,27 +208,29 @@ export default function TrainingMonitor() {
           <h1>Watch the model <em>learn noise.</em></h1>
           <p>Start training in PowerShell; this page reads the run artifacts and refreshes while it runs.</p>
         </div>
-        <label className="run-picker">Run<select value={selectedRunId} onChange={(event) => setSelectedRunId(event.target.value)} disabled={!runs.length}>
-          {!runs.length && <option value="">No runs found</option>}
-          {runs.map((run) => <option key={run.run_id} value={run.run_id}>{run.run_id} · {run.state}</option>)}
+        <label className="run-picker">Model<select value={modelFamily} onChange={(event) => setModelFamily(event.target.value as ModelFamily)}>
+          {MODEL_PROFILES.map((profile) => (
+            <option key={profile.family} value={profile.family} disabled={!resolveTrainingRun(runs, profile.family)}>
+              {profile.label}
+            </option>
+          ))}
         </select></label>
       </div>
 
       {error && <div className="error-banner" role="alert">{error}</div>}
-      {!runs.length ? (
+      {!selectedRun ? (
         <div className="monitor-empty panel">
-          <h2>No training run yet</h2>
-          <p>From the repository root, first run the small GPU pilot:</p>
-          <code>uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_original_ddpm.toml --pilot</code>
-          <p>Then start the paper-scale EuroSAT run:</p>
-          <code>uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_original_ddpm.toml</code>
-          <p>The test split is not loaded by either training command.</p>
+          <h2>{runs.length ? `${modelProfile.label} is not available yet` : 'No training run yet'}</h2>
+          <p>{runs.length
+            ? 'This model family has no active run or completed training run to monitor yet.'
+            : 'Start a DDPM or direct-score VP-SDE training run from the repository root. The test split is not loaded by training.'}</p>
+          {!runs.length && <code>uv run --locked python -m ddpm_eurosat.train --config configs/eurosat_original_ddpm.toml</code>}
         </div>
       ) : (
         <>
           <section className="panel run-summary">
-            <div className="run-state-line"><div><span className="section-index">RUN</span><h2>{selected?.run_id}</h2></div><span className={`state-badge state-${status?.state ?? selected?.state ?? 'unknown'}`}>{status?.state ?? selected?.state ?? 'loading'}</span></div>
-            <div className="progress-meta"><span>Epoch {status?.epoch ?? 0} / {status?.total_epochs ?? selected?.total_epochs ?? 0}</span><span>Update {(status?.global_step ?? 0).toLocaleString()} / {(status?.planned_steps ?? 0).toLocaleString()}</span></div>
+            <div className="run-state-line"><div><span className="section-index">MODEL</span><h2>{modelProfile.alias}</h2><small>{selectedRun.run_id}</small></div><span className={`state-badge state-${status?.state ?? selectedRun.state ?? 'unknown'}`}>{status?.state ?? selectedRun.state ?? 'loading'}</span></div>
+            <div className="progress-meta"><span>Epoch {status?.epoch ?? selectedRun.epoch} / {status?.total_epochs ?? selectedRun.total_epochs}</span><span>Update {(status?.global_step ?? selectedRun.global_step).toLocaleString()} / {(status?.planned_steps ?? 0).toLocaleString()}</span></div>
             <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
             <div className="run-stats">
               <div><small>DEVICE</small><b>{status?.device ?? '—'}</b></div>
@@ -221,21 +238,21 @@ export default function TrainingMonitor() {
               <div><small>UPDATES / SEC</small><b>{status?.steps_per_second?.toFixed(2) ?? '—'}</b></div>
               <div><small>PEAK GPU MEMORY</small><b>{status?.peak_gpu_memory_mb ? `${status.peak_gpu_memory_mb.toFixed(0)} MB` : '—'}</b></div>
             </div>
-            {resolvedConfig && <div className="resolved-config"><span>SEED <b>{resolvedConfig.seed ?? '—'}</b></span><span>OPTIMIZER <b>{resolvedConfig.training?.optimizer ?? '—'}</b></span><span>LEARNING RATE <b>{resolvedConfig.training?.learning_rate ?? '—'}</b></span><span>EFFECTIVE BATCH <b>{resolvedConfig.training?.effective_batch_size ?? resolvedConfig.training?.batch_size ?? '—'}</b></span><span>DIFFUSION STEPS <b>{resolvedConfig.diffusion?.timesteps ?? '—'}</b></span></div>}
+            {resolvedConfig && <div className="resolved-config"><span>PROCESS <b>{isVpSde ? `VP-SDE · ${resolvedConfig.model?.prediction ?? 'epsilon'} output` : 'DDPM'}</b></span><span>SEED <b>{resolvedConfig.seed ?? '—'}</b></span><span>OPTIMIZER <b>{resolvedConfig.training?.optimizer ?? '—'}</b></span><span>LEARNING RATE <b>{resolvedConfig.training?.learning_rate ?? '—'}</b></span><span>EFFECTIVE BATCH <b>{resolvedConfig.training?.effective_batch_size ?? resolvedConfig.training?.batch_size ?? '—'}</b></span>{isVpSde ? <><span>BETA MIN / MAX <b>{resolvedConfig.vp_sde?.beta_min ?? '—'} / {resolvedConfig.vp_sde?.beta_max ?? '—'}</b></span><span>MIN TRAINING t <b>{resolvedConfig.vp_sde?.training_time_min ?? '—'}</b></span></> : <span>DIFFUSION STEPS <b>{resolvedConfig.diffusion?.timesteps ?? '—'}</b></span>}</div>}
             {status?.error && <div className="error-banner">{status.error}</div>}
           </section>
 
           <section className="panel chart-panel">
-            <div className="panel-heading"><div><span className="section-index">01</span><h2>Noise-prediction loss</h2></div><span className="split-label">TRAIN UPDATES + VALIDATION CHECKPOINTS</span></div>
-            <p className="panel-copy">Training minimizes mean squared error between the sampled noise and the U-Net prediction. The curve shows 100-update mean loss; validation runs every 10,000 updates.</p>
-            <LossChart events={events} />
-            <div className="learning-note"><b>How to read this:</b> A downward loss trend means the model is improving at this noise-prediction task. It does not by itself tell us whether generated images look good.</div>
+            <div className="panel-heading"><div><span className="section-index">01</span><h2>{lossTitle}</h2></div><span className="split-label">TRAIN UPDATES + VALIDATION CHECKPOINTS</span></div>
+            <p className="panel-copy">{lossDescription} The curve shows a mean over up to {monitorWindow} updates.</p>
+            <LossChart events={events} windowUpdates={monitorWindow} label={lossTitle} />
+          <div className="learning-note"><b>How to read this:</b> A downward loss trend means the model is improving at its {isDirectScore ? 'score-estimation' : 'noise-prediction'} task. It does not by itself tell us whether generated images look good.</div>
           </section>
 
           <section className="panel checkpoint-panel">
             <div className="panel-heading"><div><span className="section-index">02</span><h2>Checkpoints</h2></div><span className="split-label">LOCAL .PT FILES</span></div>
-            {checkpoints.length ? <div className="checkpoint-list">{checkpoints.map((checkpoint) => <div className="checkpoint-row" key={checkpoint.name}><div><b>{checkpoint.name}</b><small>{checkpoint.kind} · step {checkpoint.global_step.toLocaleString()} · epoch {checkpoint.epoch}</small></div><span>{checkpoint.validation_loss === null ? '—' : `val ${checkpoint.validation_loss.toFixed(5)}`}</span><span>{(checkpoint.bytes / (1024 * 1024)).toFixed(1)} MB</span></div>)}</div> : <div className="chart-empty">Checkpoint details will appear as training progresses.</div>}
-            <p className="panel-copy checkpoint-path">Saved under <code>runs/{selectedRunId}/checkpoints/</code>. The latest checkpoint can resume from its saved update and batch position.</p>
+            {selectedCheckpoint ? <div className="checkpoint-list"><div className="checkpoint-row" key={selectedCheckpoint.name}><div><b>{modelProfile.alias}</b><small>{selectedCheckpoint.kind} · source file {selectedCheckpoint.name} · step {selectedCheckpoint.global_step.toLocaleString()} · epoch {selectedCheckpoint.epoch}</small></div><span>{selectedCheckpoint.validation_loss === null ? '—' : `val ${selectedCheckpoint.validation_loss.toFixed(5)}`}</span><span>{(selectedCheckpoint.bytes / (1024 * 1024)).toFixed(1)} MB</span></div></div> : <div className="chart-empty">The validation-selected checkpoint will appear here after validation saves it.</div>}
+            <p className="panel-copy checkpoint-path">Saved under <code>runs/{selectedRunId}/checkpoints/</code>. The underlying checkpoint remains available for resuming or inspecting the run.</p>
           </section>
         </>
       )}

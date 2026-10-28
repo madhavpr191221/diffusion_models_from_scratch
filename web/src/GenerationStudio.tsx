@@ -1,18 +1,7 @@
 import { useEffect, useState } from 'react'
+import { getModelProfile, MODEL_PROFILES, resolveGenerationRun, type ModelFamily, type ModelRun } from './modelChoices'
 
-type Run = {
-  run_id: string
-  state: string
-  mode: string
-  can_generate: boolean
-}
-type Checkpoint = {
-  name: string
-  kind: string
-  epoch: number
-  global_step: number
-  validation_loss?: number | null
-}
+type Run = ModelRun & { process?: 'ddpm' | 'vp_sde'; prediction?: 'epsilon' | 'score'; can_generate: boolean }
 type Job = { generation_id: string; run_id: string; state: string }
 type Study = {
   study_id: string
@@ -69,6 +58,7 @@ type Comparison = {
   generation_id: string
   run_id: string
   checkpoint: string
+  model_alias: string
   epoch: number
   seed: number
   num_samples: number
@@ -77,9 +67,12 @@ type Comparison = {
 }
 type Progress = {
   state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted'
+  process?: 'ddpm' | 'vp_sde'
+  sampler?: 'reverse_sde' | 'annealed_langevin'
   completed_steps: number
   total_steps: number
   current_timestep: number
+  current_t?: number
   latest_frame_index: number
   frame_stride: number
   num_samples: number
@@ -95,7 +88,7 @@ type Progress = {
   }
   error?: string
 }
-type DisplayFrame = { url: string; timestep: number }
+type DisplayFrame = { url: string; process: 'ddpm' | 'vp_sde'; timestep: number; time: number | null }
 
 async function responseError(response: Response): Promise<string> {
   try {
@@ -108,10 +101,8 @@ async function responseError(response: Response): Promise<string> {
 
 function GenerationStudio() {
   const [runs, setRuns] = useState<Run[]>([])
-  const [runId, setRunId] = useState('')
-  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
-  const [checkpointName, setCheckpointName] = useState('best-val-ema.pt')
-  const [loadingCheckpoints, setLoadingCheckpoints] = useState(false)
+  const [modelFamily, setModelFamily] = useState<ModelFamily>('ddpm')
+  const [sampler, setSampler] = useState<'reverse_sde' | 'annealed_langevin'>('reverse_sde')
   const [numSamples, setNumSamples] = useState(1)
   const [manualSeed, setManualSeed] = useState('')
   const [lastSeed, setLastSeed] = useState<number | null>(null)
@@ -130,6 +121,10 @@ function GenerationStudio() {
   const [studyError, setStudyError] = useState<string | null>(null)
   const [judgements, setJudgements] = useState<Judgement[]>([])
   const [judgementReport, setJudgementReport] = useState<JudgementReport | null>(null)
+  const modelProfile = getModelProfile(modelFamily)
+  const selectedRun = resolveGenerationRun(runs, modelFamily)
+  const runId = selectedRun?.run_id ?? ''
+  const checkpointName = modelProfile.checkpoint
 
   useEffect(() => {
     const controller = new AbortController()
@@ -139,9 +134,7 @@ function GenerationStudio() {
         const response = await fetch('/api/runs', { signal: controller.signal })
         if (!response.ok) throw new Error(await responseError(response))
         const { items } = (await response.json()) as { items: Run[] }
-        const eligible = items.filter((run) => run.can_generate)
-        setRuns(eligible)
-        setRunId((current) => eligible.some((run) => run.run_id === current) ? current : eligible[0]?.run_id ?? '')
+        setRuns(items)
       } catch (reason) {
         if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Could not load trained runs')
       } finally {
@@ -159,34 +152,6 @@ function GenerationStudio() {
   }, [])
 
   useEffect(() => {
-    if (!runId) {
-      setCheckpoints([])
-      return
-    }
-    const controller = new AbortController()
-    setLoadingCheckpoints(true)
-    fetch(`/api/runs/${runId}/checkpoints`, { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(await responseError(response))
-        return (await response.json()) as { items: Checkpoint[] }
-      })
-      .then(({ items }) => {
-        setCheckpoints(items)
-        setCheckpointName((current) => items.some((item) => item.name === current)
-          ? current
-        : items.some((item) => item.name === 'best-val-ema.pt') ? 'best-val-ema.pt'
-          : items.some((item) => item.name === 'best-val.pt') ? 'best-val.pt' : items[0]?.name ?? '')
-      })
-      .catch((reason: unknown) => {
-        if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Could not load checkpoints')
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoadingCheckpoints(false)
-      })
-    return () => controller.abort()
-  }, [runId])
-
-  useEffect(() => {
     if (!job) return
     const controller = new AbortController()
     let timer = 0
@@ -201,11 +166,12 @@ function GenerationStudio() {
         setJob((current) => current ? { ...current, state: result.state } : null)
         if (result.state === 'completed' && result.generation_id) {
           setComparisons((current) => [
-            ...current.filter((item) => item.checkpoint !== result.checkpoint),
+            ...current.filter((item) => item.model_alias !== modelProfile.alias),
             {
               generation_id: result.generation_id!,
               run_id: job.run_id,
               checkpoint: result.checkpoint,
+              model_alias: modelProfile.alias,
               epoch: result.metadata?.checkpoint_epoch ?? 0,
               seed: result.seed,
               num_samples: result.num_samples,
@@ -233,7 +199,7 @@ function GenerationStudio() {
       controller.abort()
       window.clearTimeout(timer)
     }
-  }, [job?.generation_id, job?.run_id])
+  }, [job?.generation_id, job?.run_id, modelProfile.alias])
 
   useEffect(() => {
     if (!runId) {
@@ -312,9 +278,11 @@ function GenerationStudio() {
     fetch(`/api/runs/${job.run_id}/generations/${job.generation_id}/frames/${frameIndex}`, { signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error(await responseError(response))
-        const timestep = Number(response.headers.get('X-Timestep'))
+        const process = response.headers.get('X-Process') === 'vp_sde' ? 'vp_sde' : 'ddpm'
+        const timestep = Number(response.headers.get('X-Timestep') ?? 0)
+        const timeHeader = response.headers.get('X-Time')
         objectUrl = URL.createObjectURL(await response.blob())
-        setFrame({ url: objectUrl, timestep })
+        setFrame({ url: objectUrl, process, timestep, time: timeHeader === null ? null : Number(timeHeader) })
       })
       .catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : 'Could not load this denoising frame')
@@ -363,7 +331,7 @@ function GenerationStudio() {
       const response = await fetch(`/api/runs/${runId}/generations`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ num_samples: numSamples, seed: requestedSeed, checkpoint: checkpointName }),
+        body: JSON.stringify({ num_samples: numSamples, seed: requestedSeed, checkpoint: checkpointName, sampler }),
       })
       if (!response.ok) throw new Error(await responseError(response))
       const created = (await response.json()) as Job
@@ -440,11 +408,34 @@ function GenerationStudio() {
     : null
   const studySampling = studyStarting || study?.generation_state === 'queued' || study?.generation_state === 'running'
   const studyJudging = study?.judgement_state === 'queued' || study?.judgement_state === 'running'
-  const runBusy = loadingRuns || loadingCheckpoints || starting || isRunning || studySampling
-  const chosenCheckpoint = checkpoints.find((item) => item.name === checkpointName)
+  const runBusy = loadingRuns || starting || isRunning || studySampling
   const clippedPercent = progress?.metadata?.fraction_outside_training_range === undefined
     ? null
     : 100 * progress.metadata.fraction_outside_training_range
+  const isVpSde = modelFamily === 'vp_sde_score' || progress?.process === 'vp_sde'
+  const selectedPrediction = modelFamily === 'vp_sde_score' ? 'score' : selectedRun?.prediction ?? 'epsilon'
+  const frameIsFinal = frame?.process === 'vp_sde'
+    ? progress?.sampler === 'annealed_langevin'
+      ? progress.state === 'completed' && frameIndex >= latestFrameIndex
+      : frame.time === 0
+      : frame?.timestep === 0
+
+  function selectModelFamily(family: ModelFamily) {
+    if (family === modelFamily) return
+    setModelFamily(family)
+    setSampler('reverse_sde')
+    setComparisons([])
+    setStudy(null)
+    setJudgements([])
+    setJudgementReport(null)
+    setStudyError(null)
+    setJob(null)
+    setProgress(null)
+    setFrame(null)
+    setFrameIndex(-1)
+    setPlaying(false)
+    setError(null)
+  }
 
   return (
     <section className="generation-view">
@@ -452,23 +443,33 @@ function GenerationStudio() {
         <div>
           <div className="eyebrow">LIVE UNCONDITIONAL GENERATION</div>
           <h1>Watch noise <em>become a patch.</em></h1>
-          <p>Start from fresh Gaussian noise and watch all 1,000 reverse steps create a new 64 × 64 RGB patch.</p>
+          <p>{isVpSde ? sampler === 'annealed_langevin' ? 'Start from Gaussian noise and follow 100 descending VP noise levels, with 10 Langevin updates at each level.' : 'Start from standard Gaussian noise and follow 1,000 stochastic reverse-SDE steps from t = 1 to t = 0.' : 'Start from fresh Gaussian noise and watch all 1,000 reverse steps create a new 64-by-64 RGB patch.'}</p>
         </div>
       </header>
 
       <section className="generation-controls panel" aria-label="Generation settings">
         <div className="panel-heading">
           <div><span className="section-index">01</span><h2>Generate a patch live</h2></div>
-          <span className="local-tag">{chosenCheckpoint?.name ?? 'BEST EMA CHECKPOINT'}</span>
+          <span className="local-tag">{modelProfile.alias}</span>
         </div>
-        {loadingRuns ? <div className="empty-state">Loading trained checkpoints…</div> : runs.length === 0 ? (
-          <div className="generation-empty">
-            <p>No completed checkpoint is available for generation yet.</p>
-          </div>
-        ) : (
+        {loadingRuns ? <div className="empty-state">Loading trained models…</div> : (
           <>
+          <label className="generation-run model-family-picker" htmlFor="generation-model">
+            <span>Model</span>
+            <select id="generation-model" value={modelFamily} disabled={runBusy} onChange={(event) => selectModelFamily(event.target.value as ModelFamily)}>
+              {MODEL_PROFILES.map((profile) => (
+                <option key={profile.family} value={profile.family} disabled={!resolveGenerationRun(runs, profile.family)}>
+                  {profile.label}
+                </option>
+              ))}
+            </select>
+            <small>{selectedRun
+              ? `${modelProfile.alias} · ${selectedRun.run_id} · ${modelProfile.checkpoint}`
+              : `No completed ${modelProfile.label} run with its validation-selected checkpoint is available.`}</small>
+          </label>
+          {runs.length === 0 && <div className="generation-empty"><p>No completed trained model is available for generation yet.</p></div>}
           <div className="live-generation-actions">
-            <button className="primary-button generation-submit live-generate-button" onClick={() => void startGeneration()} disabled={!runId || runBusy || loadingCheckpoints || checkpoints.length === 0}>
+            <button className="primary-button generation-submit live-generate-button" onClick={() => void startGeneration()} disabled={!selectedRun || runBusy}>
               {isRunning || starting ? 'Generating live…' : sampleGridUrl ? 'Generate another patch' : 'Generate live patch'}
             </button>
             {lastSeed !== null && <div className="live-seed-status" role="status">
@@ -479,31 +480,14 @@ function GenerationStudio() {
           <details className="generation-advanced">
             <summary>Advanced settings</summary>
             <div className="generation-form">
-              <label className="generation-run" htmlFor="generation-run">
-                <span>Completed run</span>
-                <select id="generation-run" value={runId} disabled={runBusy} onChange={(event) => {
-                  setRunId(event.target.value)
-                  setComparisons([])
-                  setStudy(null)
-                  setJudgements([])
-                  setJudgementReport(null)
-                  setJob(null)
-                  setProgress(null)
-                  setFrame(null)
-                  setFrameIndex(-1)
-                }}>
-                  {runs.map((run) => <option key={run.run_id} value={run.run_id}>{run.run_id}</option>)}
+              {isVpSde && <label className="generation-run" htmlFor="generation-sampler">
+                <span>Sampling method</span>
+                <select id="generation-sampler" value={sampler} disabled={runBusy} onChange={(event) => setSampler(event.target.value as 'reverse_sde' | 'annealed_langevin')}>
+                  <option value="reverse_sde">Reverse VP-SDE</option>
+                  <option value="annealed_langevin">Annealed Langevin dynamics</option>
                 </select>
-              </label>
-              <label className="generation-run generation-checkpoint" htmlFor="generation-checkpoint">
-                <span>Checkpoint</span>
-                <select id="generation-checkpoint" value={checkpointName} disabled={runBusy || checkpoints.length === 0} onChange={(event) => setCheckpointName(event.target.value)}>
-                  {checkpoints.map((item) => <option key={item.name} value={item.name}>
-                    {item.name} · epoch {item.epoch} · step {item.global_step.toLocaleString()}{item.validation_loss == null ? '' : ` · val ${item.validation_loss.toFixed(5)}`}
-                  </option>)}
-                </select>
-                <small>{loadingCheckpoints ? 'Loading saved checkpoints…' : chosenCheckpoint ? `${chosenCheckpoint.kind} snapshot` : 'No checkpoints available'}</small>
-              </label>
+                <small>{sampler === 'annealed_langevin' ? '100 noise levels × 10 score-ascent updates; 1,000 network evaluations.' : 'Euler–Maruyama reverse SDE; 1,000 network evaluations.'}</small>
+              </label>}
               <label className="generation-number" htmlFor="generation-count">
                 <span>Batch size (1–8 patches)</span>
                 <input id="generation-count" type="number" min="1" max="8" step="1" value={numSamples} disabled={runBusy} onChange={(event) => setNumSamples(Math.max(1, Math.min(8, Number(event.target.value) || 1)))} />
@@ -519,7 +503,7 @@ function GenerationStudio() {
               <button
                 className="primary-button generation-submit generation-advanced-button"
                 onClick={() => void startGeneration(undefined, true)}
-                disabled={!runId || runBusy || checkpoints.length === 0}
+                disabled={!selectedRun || runBusy}
                 aria-label="Generate using advanced settings"
               >
                 {isRunning || starting ? 'Generating…' : '▶ Generate'}
@@ -528,23 +512,23 @@ function GenerationStudio() {
           </details>
           </>
         )}
-        <div className="learning-note"><b>What you’re seeing:</b> one random noise image is refined by the trained denoiser. It is a new unconditional patch, not a reconstruction of a dataset image.</div>
+        <div className="learning-note"><b>What you’re seeing:</b> one random noise image is refined by the trained {isVpSde && selectedPrediction === 'score' ? 'direct-score model' : 'denoiser'}. {isVpSde ? `This checkpoint predicts ${selectedPrediction === 'score' ? 'the score directly' : 'epsilon, converted to a score using -epsilon/sigma(t)'}.` : ''} The output is a new unconditional patch, not a reconstruction of a dataset image.</div>
         {error && <div className="error-banner" role="alert">{error}</div>}
       </section>
 
       <section className="generation-trace panel" aria-label="Live reverse sampling">
         <div className="panel-heading">
           <div><span className="section-index">02</span><h2>Follow the reverse process</h2></div>
-          <span className="step-count">{progress ? `${progress.state.toUpperCase()} · ${progress.checkpoint}` : 'READY WHEN YOU ARE'}</span>
+          <span className="step-count">{progress ? `${progress.state.toUpperCase()} · ${progress.sampler === 'annealed_langevin' ? 'ANNEALED LANGEVIN' : progress.process === 'vp_sde' ? 'REVERSE VP-SDE' : 'DDPM'} · ${progress.checkpoint}` : 'READY WHEN YOU ARE'}</span>
         </div>
         <div className="generation-image-stage">
           <div className="generation-image-display">
-            {frame ? <img src={frame.url} alt={frame.timestep === 0 ? 'Generated EuroSAT-style patch' : `Current denoising state x at step ${frame.timestep}`} /> : <div className="image-placeholder">{isRunning ? 'Waiting for the first frame…' : 'Generate patches to begin from random noise'}</div>}
-            <span className="image-caption">{frame?.timestep === 0 ? 'GENERATED PATCH' : 'CURRENT STATE'} <b>{frame ? (frame.timestep === 0 ? 'x₀' : `t = ${frame.timestep}`) : 'xₜ'}</b></span>
+            {frame ? <img src={frame.url} alt={frameIsFinal ? 'Generated EuroSAT-style patch' : frame.process === 'vp_sde' ? `${progress?.sampler === 'annealed_langevin' ? 'Annealed Langevin state' : 'Reverse SDE state'} at t = ${frame.time?.toFixed(progress?.sampler === 'annealed_langevin' ? 5 : 3)}` : `Current denoising state at step ${frame.timestep}`} /> : <div className="image-placeholder">{isRunning ? 'Waiting for the first frame?' : 'Generate patches to begin from random noise'}</div>}
+            <span className="image-caption">{frameIsFinal ? 'GENERATED PATCH' : 'CURRENT STATE'} <b>{frame ? (frame.process === 'vp_sde' ? `t = ${frame.time?.toFixed(progress?.sampler === 'annealed_langevin' ? 5 : 3)}` : frame.timestep === 0 ? 'x_0' : `k = ${frame.timestep}`) : 'x_t'}</b></span>
           </div>
           <div className="generation-progress-copy">
             <strong>{progress ? `${progress.completed_steps.toLocaleString()} / ${progress.total_steps.toLocaleString()}` : '1,000 reverse steps'}</strong>
-            <span>{progress?.state === 'completed' ? 'Sampling complete' : isRunning ? 'Predicting and removing noise' : 'The model starts from Gaussian noise'}</span>
+            <span>{progress?.state === 'completed' ? 'Sampling complete' : isRunning ? (progress?.sampler === 'annealed_langevin' ? `Langevin update | VP noise level t = ${progress?.current_t?.toFixed(3) ?? '...'}` : isVpSde ? `Reverse SDE | t = ${progress?.current_t?.toFixed(3) ?? '...'}` : 'Predicting and removing noise') : isVpSde ? 'The model starts from Gaussian noise at t = 1' : 'The model starts from Gaussian noise'}</span>
           </div>
         </div>
         <div className="progress-track generation-progress-track"><span style={{ width: `${progress ? 100 * progress.completed_steps / Math.max(progress.total_steps, 1) : 0}%` }} /></div>
@@ -564,7 +548,7 @@ function GenerationStudio() {
               if (frameIndex >= latestFrameIndex && progress?.state === 'completed') setFrameIndex(0)
               setPlaying((current) => !current)
             }}>{playing ? 'Ⅱ  Pause animation' : '▶  Play animation'}</button>
-            <span className="play-hint">101 snapshots · every 10 reverse steps</span>
+            <span className="play-hint">101 snapshots · every 10 {progress?.sampler === 'annealed_langevin' ? 'Langevin updates' : 'reverse steps'}</span>
           </div>
         </div>
       </section>
@@ -576,14 +560,14 @@ function GenerationStudio() {
             <span className="split-label">SEED {progress?.seed ?? lastSeed ?? '—'} · {progress?.num_samples ?? numSamples} {(progress?.num_samples ?? numSamples) === 1 ? 'PATCH' : 'PATCHES'}</span>
           </div>
           <img className="generated-grid-image" src={sampleGridUrl} alt={`${progress?.num_samples ?? numSamples} unconditional EuroSAT-style image patches generated from noise`} />
-          <p className="panel-copy">The full batch is shown above. The animation follows patch 1 from its initial noise to its final sample. Checkpoint: <code>{progress?.checkpoint ?? checkpointName}</code>; seed: {progress?.seed ?? lastSeed ?? '—'}.</p>
+          <p className="panel-copy">The full batch is shown above. The animation follows patch 1 from its initial noise to its final sample. Model: <code>{modelProfile.alias}</code> · source checkpoint: {progress?.checkpoint ?? checkpointName} · run: {job?.run_id ?? '—'} · seed: {progress?.seed ?? lastSeed ?? '—'}.</p>
           {clippedPercent !== null && <p className="generation-diagnostic" role="status">
             Raw values range from {progress?.metadata?.sample_value_range?.[0].toFixed(2)} to {progress?.metadata?.sample_value_range?.[1].toFixed(2)}. Display conversion clips {clippedPercent.toFixed(1)}% of tensor values to the trained image range [-1, 1]. Raw samples are preserved in the run artifacts.
           </p>}
         </section>
       )}
 
-      <section className="generation-study panel" aria-label="Generate and judge a patch cohort">
+      {!isVpSde && <section className="generation-study panel" aria-label="Generate and judge a patch cohort">
         <div className="panel-heading">
           <div><span className="section-index">04</span><h2>Generate and judge a cohort</h2></div>
           <span className="split-label">ONE RESULT PER PATCH</span>
@@ -702,18 +686,18 @@ function GenerationStudio() {
             </div>
           </div>
         )}
-      </section>
+      </section>}
 
       {comparisons.length > 1 && (
         <section className="generation-comparison panel" aria-label="Checkpoint sample comparison">
           <div className="panel-heading">
-            <div><span className="section-index">04</span><h2>Compare checkpoints</h2></div>
-            <span className="split-label">SAME SEED {comparisons[0].seed} · {comparisons.length} CHECKPOINTS</span>
+            <div><span className="section-index">04</span><h2>Compare models</h2></div>
+            <span className="split-label">SAME SEED {comparisons[0].seed} · {comparisons.length} MODELS</span>
           </div>
           <div className="checkpoint-comparison-grid">
-            {comparisons.map((item) => <figure key={item.checkpoint}>
-              <figcaption>{item.checkpoint}</figcaption>
-              <img src={`/api/runs/${item.run_id}/generations/${item.generation_id}/samples.png`} alt={`${item.num_samples} generated patches from ${item.checkpoint} with seed ${item.seed}`} />
+            {comparisons.map((item) => <figure key={item.model_alias}>
+              <figcaption>{item.model_alias}</figcaption>
+              <img src={`/api/runs/${item.run_id}/generations/${item.generation_id}/samples.png`} alt={`${item.num_samples} generated patches from ${item.model_alias} with seed ${item.seed}`} />
               <small>{item.num_samples} patches · seed {item.seed}</small>
               {item.sample_statistics && <small>
                 Outside range: {(100 * item.sample_statistics.fraction_outside_training_range).toFixed(1)}% ·
@@ -740,7 +724,7 @@ function GenerationStudio() {
       )}
 
       <footer className="page-footer generation-footer">
-        <span>UNCONDITIONAL DDPM · EUROSAT RGB</span>
+        <span>UNCONDITIONAL {isVpSde ? 'VP-SDE' : 'DDPM'} &middot; EUROSAT RGB</span>
         <span>SELECTED CHECKPOINT · NO LABELS</span>
         <span>64 × 64 PATCHES</span>
       </footer>
