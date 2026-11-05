@@ -2,7 +2,7 @@
 
 ## Status
 
-Stage 1 decisions are recorded. The fixed-step ODE solvers, Flow Matching model/trainer/sampler, API, and React Flows view are implemented. No 50-epoch Flow Matching training run or CNF implementation has been started; the only GPU operation so far was a one-batch preflight with no optimizer update. The current discrete DDPM and VP-SDE implementations remain parallel, supported paths.
+Stage 1 decisions are recorded. The fixed-step ODE solvers, Flow Matching model/trainer/sampler, API, and React Flows view are implemented. The configured 50-epoch Flow Matching run completed on CUDA (run `20261105-211555-flow-matching-seed-42`); generated checkpoint files remain local. CNF has not been implemented. The current discrete DDPM and VP-SDE implementations remain parallel, supported paths.
 
 ## Purpose and research question
 

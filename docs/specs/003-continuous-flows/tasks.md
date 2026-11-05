@@ -1,6 +1,6 @@
 # Tasks: Continuous Flows on EuroSAT RGB
 
-Stage 1 decisions are recorded. Euler/Heun, the Flow Matching CLI path, the React Flows inspection path, checkpoint/resume handling, and the run monitor are implemented. A warmed-up effective-batch pilot estimates about 1.37 hours for the 50-epoch run. Training is held for the user to review this revised estimate and explicitly approve the long run; no CNF work has started.
+Stage 1 decisions are recorded. Euler/Heun, the Flow Matching CLI path, the React Flows inspection path, checkpoint/resume handling, and the run monitor are implemented. The first 50-epoch run is complete; trajectory, solver, image-cohort, and VLM inspection remain. No CNF work has started.
 
 ## Stage 0 — Repository audit
 
@@ -35,11 +35,12 @@ Stage 1 decisions are recorded. Euler/Heun, the Flow Matching CLI path, the Reac
 - [x] Run a no-update microbatch preflight and a warmed-up effective-batch throughput pilot; record VRAM and the revised run-time estimate.
 - [x] Implement best raw/EMA checkpoints, one rolling epoch-boundary resume checkpoint, and resume compatibility checks.
 - [x] Expose Flow Matching training progress and loss curves in the React Flows view.
-- [ ] Review the revised ~1.37-hour estimate and explicitly approve or revise the training budget before starting training.
+- [x] Review the revised run-time estimate and approve the 50-epoch training run.
 
 ## Stage 4 — EuroSAT flow-matching experiment
 
-- [ ] After the resource review gate, train only on `train` and use `validation` for selection/diagnostics; do not load `test`.
+- [x] Train 50 epochs only on `train` and use `validation` for selection/diagnostics; do not load `test`.
+- [x] Retain best raw and EMA weights plus one rolling resume checkpoint; remove `latest` after successful completion.
 - [ ] Compare Euler and Heun on matched initial seeds and report solver NFE, runtime, sensitivity, and saved trajectories.
 - [ ] Inspect patch cohorts, raw ranges, channel statistics, diversity, and numerical warnings.
 - [ ] Record guarantees, verified implementation behavior, observed results, and remaining uncertainty.

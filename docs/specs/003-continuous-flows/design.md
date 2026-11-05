@@ -2,7 +2,7 @@
 
 ## Design status
 
-Stage 1 decisions and the initial Flow Matching implementation are recorded here alongside the [specification](spec.md) and [milestone tasks](tasks.md). The Milestone 0 audit is [here](../../plans/cnf-flow-matching-eurosat.md). The fixed-step solvers, continuous velocity model, trainer, API, and React Flows inspection path are implemented. Full training remains gated on review of the preflight estimate; CNF remains unimplemented.
+Stage 1 decisions and the Flow Matching implementation are recorded here alongside the [specification](spec.md) and [milestone tasks](tasks.md). The Milestone 0 audit is [here](../../plans/cnf-flow-matching-eurosat.md). The fixed-step solvers, continuous velocity model, trainer, API, and React Flows inspection path are implemented. The first 50-epoch run has completed; generation and solver-sensitivity inspection remain pending. CNF remains unimplemented.
 
 ## Boundaries
 
@@ -93,6 +93,10 @@ No frontend/API changes occur before command-line model, sampling, checkpoint, a
 
 ## Implemented Flow Matching preflight and checkpoint policy
 
-The initial cold one-microbatch preflight was not representative of sustained training. A warmed-up effective-batch pilot then measured five optimizer updates using real training data, eight microbatches per update, Adam, clipping, and EMA. The steady median was 0.762 seconds per effective update. A validation pass over the configured 512 images took 1.672 seconds. For 6,350 updates and 50 validation passes, these measurements project approximately 1.37 hours, excluding checkpoint I/O and runtime variation. Peak allocated GPU memory was 436.7 MB on the RTX 5060 Laptop GPU. The pilot did not write weights, and the test split was not loaded. This is still an estimate, not a measured full-run duration. The full run has not started and is held for explicit approval of this revised estimate.
+The initial cold one-microbatch preflight was not representative of sustained training. A warmed-up effective-batch pilot then measured five optimizer updates using real training data, eight microbatches per update, Adam, clipping, and EMA. The steady median was 0.762 seconds per effective update. A validation pass over the configured 512 images took 1.672 seconds. For 6,350 updates and 50 validation passes, these measurements projected approximately 1.37 hours. Peak allocated GPU memory was 436.7 MB on the RTX 5060 Laptop GPU. The pilot did not write weights, and the test split was not loaded. The actual approved run completed in 56.6 minutes; the measured run details are recorded below.
 
 Training retains only `best-eurosat-flow-matching.pt` (best raw validation loss), `best-eurosat-flow-matching-ema.pt` (best EMA validation loss), and one overwrite-in-place `latest-eurosat-flow-matching.pt` recovery checkpoint. Latest is written at epoch boundaries and is removed after a successful run; if interrupted, it remains resumable. Resume validates exact config compatibility and restores model, EMA, optimizer, and RNG state at an epoch boundary. Generation defaults to the EMA best checkpoint and allows selection of the raw best checkpoint. The React Flows view includes run progress, training and validation loss, device, elapsed time, and peak VRAM. The existing two-model DDPM/VP-SDE selector is unchanged.
+
+## Completed Flow Matching training run
+
+Run `20261105-211555-flow-matching-seed-42` completed all 50 epochs and 6,350 optimizer updates on the training split in 3,396.9 seconds (56.6 minutes). The configured effective batch size was 128 (microbatch 16), and peak allocated VRAM was 437.4 MB. Best raw validation loss was 0.06893 and best EMA validation loss was 0.06812. Final epoch validation losses were higher (0.08667 raw; 0.08440 EMA), so the best checkpoints come from earlier epochs. Only the two best checkpoints remain in the local run directory; `latest` was removed after successful completion. The held-out test split was not loaded. These losses measure pixel-averaged conditional velocity regression and do not establish generation quality. No samples have yet been judged by the VLM for this trained checkpoint.
