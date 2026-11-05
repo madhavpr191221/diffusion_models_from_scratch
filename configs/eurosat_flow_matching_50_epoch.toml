@@ -1,0 +1,40 @@
+# Unconditional EuroSAT RGB conditional-flow-matching baseline.
+# Flow time runs from Gaussian noise at t=0 to image data at t=1.
+process = "flow_matching"
+seed = 42
+image_size = 64
+image_channels = 3
+normalization_min = -1.0
+normalization_max = 1.0
+
+[dataset]
+repository = "blanchon/EuroSAT_RGB"
+revision = "655ef66ef2be07f89aec61407f24c772802eb87d"
+cache_dir = "data/huggingface"
+train_split = "train"
+validation_split = "validation"
+test_split = "test"
+
+[flow_matching]
+time_start = 0.0
+time_end = 1.0
+time_convention = "noise_to_data"
+interpolation = "linear_independent_endpoints"
+dequantization = "centered_uniform_width_2_over_255"
+
+[model]
+architecture = "flow_matching_compact_v1"
+prediction = "velocity"
+time_embedding = "continuous_fourier"
+
+[training]
+epochs = 50
+effective_batch_size = 128
+micro_batch_size = 16
+learning_rate = 0.0002
+optimizer = "adam"
+warmup_updates = 40
+gradient_clip = 1.0
+ema_decay = 0.999
+horizontal_flip = true
+validation_images = 512

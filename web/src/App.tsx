@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import TrainingMonitor from './TrainingMonitor'
 import GenerationStudio from './GenerationStudio'
+import FlowStudio from './FlowStudio'
 import './App.css'
 
 type ImageItem = { index: number; url: string }
@@ -21,7 +22,7 @@ async function responseError(response: Response): Promise<string> {
 }
 
 function App() {
-  const [view, setView] = useState<'forward' | 'training' | 'generation'>('generation')
+  const [view, setView] = useState<'forward' | 'training' | 'generation' | 'flows'>('generation')
   const [pageOffset, setPageOffset] = useState(0)
   const [page, setPage] = useState<ImagePage | null>(null)
   const [selectedImage, setSelectedImage] = useState<ImageItem | null>(null)
@@ -161,18 +162,19 @@ function App() {
           <span>FIELDNOTES <b>/ DDPM</b></span>
         </a>
         <div className="topbar-right">
-          <span className="status-pill"><span className="status-dot" /> {view === 'forward' ? 'FORWARD PROCESS · NO TRAINED MODEL REQUIRED' : view === 'training' ? 'LOCAL TRAINING MONITOR' : 'UNCONDITIONAL PATCH GENERATION'}</span>
+          <span className="status-pill"><span className="status-dot" /> {view === 'forward' ? 'FORWARD PROCESS · NO TRAINED MODEL REQUIRED' : view === 'training' ? 'LOCAL TRAINING MONITOR' : view === 'flows' ? 'CONTINUOUS FLOW MATCHING · NOISE TO DATA' : 'UNCONDITIONAL PATCH GENERATION'}</span>
           <a className="log-link" href="/api/learning-log" target="_blank" rel="noreferrer">Learning log ↗</a>
         </div>
       </header>
 
       <nav className="view-tabs" aria-label="Project views">
         <button className={view === 'generation' ? 'active' : ''} onClick={() => setView('generation')}>Generate</button>
+        <button className={view === 'flows' ? 'active' : ''} onClick={() => setView('flows')}>Flows</button>
         <button className={view === 'forward' ? 'active' : ''} onClick={() => setView('forward')}>Forward process</button>
         <button className={view === 'training' ? 'active' : ''} onClick={() => setView('training')}>Training monitor</button>
       </nav>
 
-      {view === 'training' ? <TrainingMonitor /> : view === 'generation' ? <GenerationStudio /> : <>
+      {view === 'training' ? <TrainingMonitor /> : view === 'generation' ? <GenerationStudio /> : view === 'flows' ? <FlowStudio /> : <>
       <section className="intro" id="top">
         <div className="eyebrow">AN INTERACTIVE DDPM NOTEBOOK · STAGE 2.5</div>
         <h1>Watch an image <em>become noise.</em></h1>

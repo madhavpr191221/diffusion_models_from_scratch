@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -30,12 +31,20 @@ from ddpm_eurosat.diffusion import DiffusionSchedule, q_sample, q_sample_markov
 from ddpm_eurosat.generation_evaluation import (
     GENERATION_CHUNK_SIZE,
     JUDGEMENT_BATCH_SIZE,
+    JUDGEMENT_PROMPT_VERSION,
     REFERENCE_COUNT,
     build_judgement_report,
     generate_cohort,
     judge_batch,
+    make_reference_sheet,
 )
-from ddpm_eurosat.sampling import LIVE_FRAME_STRIDE, choose_device, display_grid, generate_from_checkpoint
+from ddpm_eurosat.sampling import LIVE_FRAME_STRIDE, choose_device, display_grid, generate_from_checkpoint, summarize_images
+from ddpm_eurosat.flow_matching import (
+    BEST_FLOW_MATCHING_CHECKPOINT,
+    BEST_FLOW_MATCHING_EMA_CHECKPOINT,
+    ContinuousTimeVelocityUNet,
+    sample_flow_matching,
+)
 from ddpm_eurosat.score_sde_sampling import generate_from_checkpoint as generate_from_vp_sde_checkpoint
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -149,6 +158,14 @@ class CreateGenerationStudyRequest(BaseModel):
     num_samples: int = Field(default=100, ge=1, le=1000)
     seed: int = Field(default=42, ge=0, le=4_294_967_295)
     checkpoint: str = Field(default="best-val-ema.pt", min_length=1, max_length=100)
+
+
+class CreateFlowStudyRequest(BaseModel):
+    num_samples: Literal[1, 100] = 1
+    seed: int = Field(default=42, ge=0, le=4_294_967_295)
+    solver: Literal["euler", "heun"] = "heun"
+    steps: int = Field(default=100, ge=2, le=500)
+    checkpoint: str = BEST_FLOW_MATCHING_EMA_CHECKPOINT
 
 
 def atomic_json(path: Path, value: dict[str, object]) -> None:
@@ -510,7 +527,10 @@ def health() -> dict[str, str | bool]:
                 isinstance(status, dict)
                 and status.get("state") == "completed"
                 and status.get("mode") == "train"
-                and (path / "checkpoints" / "best-val.pt").is_file()
+                and (
+                    (path / "checkpoints" / "best-val.pt").is_file()
+                    or (path / "checkpoints" / BEST_FLOW_MATCHING_EMA_CHECKPOINT).is_file()
+                )
             ):
                 trained = True
                 break
@@ -529,7 +549,10 @@ def list_runs() -> dict[str, list[dict[str, object]]]:
             if not isinstance(status, dict) or not isinstance(run_config, dict):
                 continue
             process = run_process(run_config)
-            generation_checkpoint = "best-val-ema.pt" if process == "vp_sde" else "best-val.pt"
+            generation_checkpoint = (
+                BEST_FLOW_MATCHING_EMA_CHECKPOINT if process == "flow_matching"
+                else "best-val-ema.pt" if process == "vp_sde" else "best-val.pt"
+            )
             items.append(
                 {
                     "run_id": run_dir.name,
@@ -550,7 +573,12 @@ def list_runs() -> dict[str, list[dict[str, object]]]:
                     "can_generate": (
                         status.get("state") == "completed"
                         and status.get("mode") == "train"
-                        and (run_dir / "checkpoints" / generation_checkpoint).is_file()
+                        and (
+                            any((run_dir / "checkpoints" / name).is_file() for name in (
+                                BEST_FLOW_MATCHING_CHECKPOINT, BEST_FLOW_MATCHING_EMA_CHECKPOINT
+                            )) if process == "flow_matching"
+                            else (run_dir / "checkpoints" / generation_checkpoint).is_file()
+                        )
                     ),
                 }
             )
@@ -884,6 +912,352 @@ def get_generation_study_judgements(run_id: str, study_id: str) -> dict[str, obj
     report = read_run_json(output_dir, "judgement-report.json", {})
     return {
         "items": values.get("items", []) if isinstance(values, dict) else [],
+        "report": report if isinstance(report, dict) else {},
+    }
+
+
+def flow_study_dir(run_id: str, study_id: str) -> Path:
+    run_dir = get_run_dir(run_id)
+    if not re.fullmatch(r"[0-9a-f]{32}", study_id):
+        raise HTTPException(status_code=404, detail="Flow study not found")
+    path = run_dir / "flow-studies" / study_id
+    if not path.is_dir():
+        raise HTTPException(status_code=404, detail="Flow study not found")
+    return path
+
+
+def write_flow_status(path: Path, **fields: object) -> dict[str, object]:
+    current = read_run_json(path, "status.json", {})
+    status = current if isinstance(current, dict) else {}
+    status.update(fields, updated_at=datetime.now(UTC).isoformat())
+    atomic_json(path / "status.json", status)
+    return status
+
+
+def load_flow_model(checkpoint_path: Path, device: torch.device) -> tuple[ContinuousTimeVelocityUNet, dict[str, object]]:
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    config = payload.get("config") if isinstance(payload, dict) else None
+    if not isinstance(config, dict) or config.get("process") != "flow_matching":
+        raise HTTPException(status_code=409, detail="Checkpoint is not a Flow Matching model")
+    if config.get("model", {}).get("architecture") != ContinuousTimeVelocityUNet.architecture_id:
+        raise HTTPException(status_code=409, detail="Unsupported Flow Matching architecture")
+    model = ContinuousTimeVelocityUNet().to(device)
+    model.load_state_dict(payload["model_state_dict"], strict=True)
+    model.eval()
+    return model, payload
+
+
+def run_flow_study_job(run_id: str, study_id: str, output_dir: Path, checkpoint_path: Path) -> None:
+    global _active_sampling_job
+    status_path = output_dir / "status.json"
+    try:
+        status = read_run_json(output_dir, "status.json", {})
+        status = status if isinstance(status, dict) else {}
+        status.update(generation_state="running", updated_at=datetime.now(UTC).isoformat())
+        atomic_json(status_path, status)
+        device = choose_device("auto")
+        model, checkpoint = load_flow_model(checkpoint_path, device)
+        count = int(status["num_samples"])
+        seed = int(status["seed"])
+        steps = int(status["steps"])
+        solver = str(status["solver"])
+        generated: list[torch.Tensor] = []
+        batch_model_calls = 0
+        nfe_per_sample = 0
+        started = time.perf_counter()
+        patches_dir = output_dir / "patches"
+        frames_dir = output_dir / "frames"
+        patches_dir.mkdir(parents=True, exist_ok=True)
+        frames_dir.mkdir(parents=True, exist_ok=True)
+        for start in range(0, count, GENERATION_CHUNK_SIZE):
+            chunk_count = min(GENERATION_CHUNK_SIZE, count - start)
+            chunk, trajectory = sample_flow_matching(
+                model, count=chunk_count, seed=seed + start, steps=steps,
+                method=solver, device=device, save_every=max(1, steps // 100),
+            )
+            generated.append(chunk.detach().cpu())
+            batch_model_calls += trajectory.nfe
+            nfe_per_sample = trajectory.nfe
+            for offset, image in enumerate(chunk):
+                sample_index = start + offset
+                (patches_dir / f"patch-{sample_index + 1:04d}.png").write_bytes(encode_normalized_image(image))
+            if start == 0:
+                frame_times: list[float] = []
+                for frame_index, (flow_time, state) in enumerate(zip(trajectory.times, trajectory.states, strict=True)):
+                    (frames_dir / f"frame-{frame_index:05d}.png").write_bytes(encode_normalized_image(state[0]))
+                    frame_times.append(float(flow_time))
+                atomic_json(output_dir / "trajectory.json", {"times": frame_times, "nfe_per_sample": trajectory.nfe})
+            write_flow_status(
+                output_dir, generation_state="running", generation_completed=start + chunk_count,
+                generation_total=count, nfe_per_sample=nfe_per_sample,
+                batch_model_calls=batch_model_calls,
+            )
+
+        samples = torch.cat(generated, dim=0)
+        torch.save(samples, output_dir / "samples.pt")
+        display_grid(samples, output_dir / "samples.png", columns=min(8, count))
+        summary = summarize_images(samples)
+        reference_indices = np.random.default_rng(42).choice(
+            len(validation_images()), size=REFERENCE_COUNT, replace=False
+        ).tolist()
+        references = torch.stack([validation_images()[index] for index in reference_indices])
+        (output_dir / "reference.png").write_bytes(make_reference_sheet(references))
+        rng = random.Random(seed + 91_007)
+        sample_order = list(range(count))
+        rng.shuffle(sample_order)
+        patch_map = [
+            {"patch_id": f"patch-{rng.getrandbits(32):08x}", "sample_index": index}
+            for index in sample_order
+        ]
+        atomic_json(output_dir / "patch-map.json", {"items": patch_map})
+        write_flow_status(
+            output_dir,
+            generation_state="completed", generation_completed=count, generation_total=count,
+            nfe_per_sample=nfe_per_sample, batch_model_calls=batch_model_calls,
+            checkpoint_epoch=checkpoint.get("epoch"),
+            sample_value_range=summary["value_range"],
+            fraction_outside_training_range=summary["fraction_outside_training_range"],
+            sample_statistics=summary,
+            elapsed_seconds=time.perf_counter() - started,
+            latest_frame_index=len(frame_times) - 1,
+            can_judge=count == 100 and bool(os.environ.get("OPENAI_API_KEY")),
+            validation_reference_selection=(
+                f"{REFERENCE_COUNT} unlabeled validation images; fixed RNG seed 42; indices {reference_indices}"
+            ),
+        )
+    except Exception as error:
+        write_flow_status(
+            output_dir, generation_state="failed", error=f"{type(error).__name__}: {error}"
+        )
+    finally:
+        with _generation_lock:
+            if _active_sampling_job == (run_id, study_id):
+                _active_sampling_job = None
+
+
+def run_flow_judgement_job(run_id: str, study_id: str, output_dir: Path) -> None:
+    key = (run_id, study_id)
+    try:
+        status = read_run_json(output_dir, "status.json", {})
+        status = status if isinstance(status, dict) else {}
+        status.update(judgement_state="running", judgement_completed=0, updated_at=datetime.now(UTC).isoformat())
+        atomic_json(output_dir / "status.json", status)
+        mapping = read_run_json(output_dir, "patch-map.json", {})
+        patch_items = mapping.get("items", []) if isinstance(mapping, dict) else []
+        if len(patch_items) != 100:
+            raise RuntimeError("A VLM comparison requires exactly 100 generated patches")
+        reference_sheet = (output_dir / "reference.png").read_bytes()
+        client = OpenAI()
+        results: list[dict[str, object]] = []
+        usage_total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        for start in range(0, 100, JUDGEMENT_BATCH_SIZE):
+            batch = patch_items[start : start + JUDGEMENT_BATCH_SIZE]
+            patch_ids = [str(item["patch_id"]) for item in batch]
+            images = torch.stack([
+                image_to_tensor(Image.open(output_dir / "patches" / f"patch-{int(item['sample_index']) + 1:04d}.png").convert("RGB"))
+                for item in batch
+            ])
+            judged, usage = judge_batch(
+                client, patch_ids=patch_ids, images=images, reference_sheet=reference_sheet
+            )
+            index_by_id = {str(item["patch_id"]): int(item["sample_index"]) for item in batch}
+            for item in judged:
+                item["sample_index"] = index_by_id[str(item["patch_id"])]
+            results.extend(judged)
+            for name in usage_total:
+                usage_total[name] += int(usage.get(name, 0))
+            atomic_json(output_dir / "judgements.json", {"items": results})
+            write_flow_status(
+                output_dir, judgement_state="running", judgement_completed=len(results),
+                judgement_total=100, judgement_completed_batches=(start // JUDGEMENT_BATCH_SIZE) + 1,
+                judgement_total_batches=10,
+            )
+        generation_metadata = read_run_json(output_dir, "status.json", {})
+        report = build_judgement_report(results, generation_metadata if isinstance(generation_metadata, dict) else {})
+        report.update({
+            "prompt_version": JUDGEMENT_PROMPT_VERSION,
+            "comparison_design": "blind_independent_patch_ratings",
+            "judgment_batch_size": JUDGEMENT_BATCH_SIZE,
+            "judgment_requests": 10,
+            "patches_per_model": 100,
+            "token_usage": usage_total,
+            "reference_selection": generation_metadata.get("validation_reference_selection"),
+        })
+        atomic_json(output_dir / "judgement-report.json", report)
+        write_flow_status(output_dir, judgement_state="completed", judgement_completed=100, judgement_total=100)
+    except Exception as error:
+        write_flow_status(
+            output_dir, judgement_state="failed", judgement_error=f"{type(error).__name__}: {error}"
+        )
+    finally:
+        with _active_judgement_lock:
+            _active_judgements.discard(key)
+
+
+@app.get("/api/flows/runs")
+def list_flow_runs() -> dict[str, list[dict[str, object]]]:
+    items: list[dict[str, object]] = []
+    if RUNS_ROOT.is_dir():
+        for run_dir in RUNS_ROOT.iterdir():
+            config = read_run_json(run_dir, "config.json", {}) if run_dir.is_dir() else {}
+            status = read_run_json(run_dir, "status.json", {}) if run_dir.is_dir() else {}
+            wrapped = config.get("config", {}) if isinstance(config, dict) else {}
+            if not isinstance(wrapped, dict) or wrapped.get("process") != "flow_matching":
+                continue
+            items.append({
+                "run_id": run_dir.name,
+                "state": status.get("state", "unknown") if isinstance(status, dict) else "unknown",
+                "epoch": status.get("epoch", 0) if isinstance(status, dict) else 0,
+                "total_epochs": status.get("total_epochs", 0) if isinstance(status, dict) else 0,
+                "global_step": status.get("global_step", 0) if isinstance(status, dict) else 0,
+                "created_at": config.get("created_at") if isinstance(config, dict) else None,
+                "planned_steps": status.get("planned_steps", 0) if isinstance(status, dict) else 0,
+                "device": status.get("device") if isinstance(status, dict) else None,
+                "elapsed_seconds": status.get("elapsed_seconds") if isinstance(status, dict) else None,
+                "steps_per_second": status.get("steps_per_second") if isinstance(status, dict) else None,
+                "peak_gpu_memory_mb": status.get("peak_gpu_memory_mb") if isinstance(status, dict) else None,
+                "train_loss": status.get("train_loss") if isinstance(status, dict) else None,
+                "epoch_train_loss": status.get("epoch_train_loss") if isinstance(status, dict) else None,
+                "validation_loss": status.get("validation_loss") if isinstance(status, dict) else None,
+                "ema_validation_loss": status.get("ema_validation_loss") if isinstance(status, dict) else None,
+                "error": status.get("error") if isinstance(status, dict) else None,
+                "available_checkpoints": [
+                    name for name in (BEST_FLOW_MATCHING_CHECKPOINT, BEST_FLOW_MATCHING_EMA_CHECKPOINT)
+                    if (run_dir / "checkpoints" / name).is_file()
+                ],
+                "can_generate": bool(
+                    isinstance(status, dict) and status.get("state") == "completed"
+                    and any((run_dir / "checkpoints" / name).is_file() for name in (
+                        BEST_FLOW_MATCHING_CHECKPOINT, BEST_FLOW_MATCHING_EMA_CHECKPOINT
+                    ))
+                ),
+                "device": status.get("device") if isinstance(status, dict) else None,
+                "planned_steps": status.get("planned_steps", 0) if isinstance(status, dict) else 0,
+                "elapsed_seconds": status.get("elapsed_seconds") if isinstance(status, dict) else None,
+                "steps_per_second": status.get("steps_per_second") if isinstance(status, dict) else None,
+                "peak_gpu_memory_mb": status.get("peak_gpu_memory_mb") if isinstance(status, dict) else None,
+                "train_loss": status.get("train_loss") if isinstance(status, dict) else None,
+                "validation_loss": status.get("validation_loss") if isinstance(status, dict) else None,
+                "ema_validation_loss": status.get("ema_validation_loss") if isinstance(status, dict) else None,
+                "error": status.get("error") if isinstance(status, dict) else None,
+            })
+    items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return {"items": items}
+
+
+@app.post("/api/flows/runs/{run_id}/studies", status_code=202)
+def create_flow_study(
+    run_id: str, request: CreateFlowStudyRequest, background_tasks: BackgroundTasks
+) -> dict[str, str]:
+    global _active_sampling_job
+    run_dir = get_run_dir(run_id)
+    run_config = read_run_json(run_dir, "config.json", {})
+    status = read_run_json(run_dir, "status.json", {})
+    wrapped = run_config.get("config", {}) if isinstance(run_config, dict) else {}
+    if not isinstance(wrapped, dict) or wrapped.get("process") != "flow_matching":
+        raise HTTPException(status_code=409, detail="Selected run is not a Flow Matching model")
+    if not isinstance(status, dict) or status.get("state") != "completed" or status.get("mode") != "train":
+        raise HTTPException(status_code=409, detail="Flow Matching training is not complete")
+    if request.checkpoint not in {BEST_FLOW_MATCHING_CHECKPOINT, BEST_FLOW_MATCHING_EMA_CHECKPOINT}:
+        raise HTTPException(status_code=422, detail="Unsupported Flow Matching checkpoint")
+    checkpoint_path = run_dir / "checkpoints" / request.checkpoint
+    if not checkpoint_path.is_file():
+        raise HTTPException(status_code=404, detail="The selected best-validation checkpoint is missing")
+    with _generation_lock:
+        if _active_sampling_job is not None:
+            raise HTTPException(status_code=409, detail="Another sampling job is already running")
+        study_id = uuid4().hex
+        output_dir = run_dir / "flow-studies" / study_id
+        output_dir.mkdir(parents=True, exist_ok=False)
+        now = datetime.now(UTC).isoformat()
+        atomic_json(output_dir / "status.json", {
+            "run_id": run_id, "study_id": study_id, "created_at": now,
+            "generation_state": "queued", "generation_completed": 0,
+            "generation_total": request.num_samples, "judgement_state": "not_started",
+            "judgement_completed": 0, "judgement_total": 100,
+            "num_samples": request.num_samples, "seed": request.seed,
+            "solver": request.solver, "steps": request.steps,
+            "checkpoint": request.checkpoint, "can_judge": False,
+        })
+        _active_sampling_job = (run_id, study_id)
+        background_tasks.add_task(run_flow_study_job, run_id, study_id, output_dir, checkpoint_path)
+    return {"run_id": run_id, "study_id": study_id}
+
+
+@app.get("/api/flows/runs/{run_id}/studies/{study_id}")
+def get_flow_study(run_id: str, study_id: str) -> dict[str, object]:
+    output_dir = flow_study_dir(run_id, study_id)
+    status = read_run_json(output_dir, "status.json", {})
+    result = status if isinstance(status, dict) else {}
+    if result.get("generation_state") in {"queued", "running"}:
+        with _generation_lock:
+            active = _active_sampling_job == (run_id, study_id)
+        if not active:
+            result = write_flow_status(output_dir, generation_state="interrupted", error="API stopped during sampling")
+    if result.get("judgement_state") in {"queued", "running"}:
+        with _active_judgement_lock:
+            active_judgement = (run_id, study_id) in _active_judgements
+        if not active_judgement:
+            result = write_flow_status(output_dir, judgement_state="failed", judgement_error="VLM review was interrupted")
+    result["can_judge"] = result.get("num_samples") == 100 and bool(os.environ.get("OPENAI_API_KEY"))
+    return result
+
+
+@app.get("/api/flows/runs/{run_id}/studies/{study_id}/samples.png")
+def get_flow_study_grid(run_id: str, study_id: str) -> FileResponse:
+    output_dir = flow_study_dir(run_id, study_id)
+    if read_run_json(output_dir, "status.json", {}).get("generation_state") != "completed":
+        raise HTTPException(status_code=409, detail="Flow samples are not ready")
+    return FileResponse(output_dir / "samples.png", media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/flows/runs/{run_id}/studies/{study_id}/samples/{sample_index}.png")
+def get_flow_study_patch(run_id: str, study_id: str, sample_index: int) -> FileResponse:
+    output_dir = flow_study_dir(run_id, study_id)
+    status = read_run_json(output_dir, "status.json", {})
+    if not isinstance(status, dict) or status.get("generation_state") != "completed" or not 0 <= sample_index < int(status.get("num_samples", 0)):
+        raise HTTPException(status_code=404, detail="Flow patch not found")
+    return FileResponse(output_dir / "patches" / f"patch-{sample_index + 1:04d}.png", media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/flows/runs/{run_id}/studies/{study_id}/frames/{frame_index}")
+def get_flow_study_frame(run_id: str, study_id: str, frame_index: int) -> Response:
+    output_dir = flow_study_dir(run_id, study_id)
+    trajectory = read_run_json(output_dir, "trajectory.json", {})
+    times = trajectory.get("times", []) if isinstance(trajectory, dict) else []
+    if not isinstance(times, list) or not 0 <= frame_index < len(times):
+        raise HTTPException(status_code=404, detail="Flow trajectory frame not found")
+    path = output_dir / "frames" / f"frame-{frame_index:05d}.png"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Flow trajectory frame not found")
+    return Response(path.read_bytes(), media_type="image/png", headers={"X-Flow-Time": f"{float(times[frame_index]):.8f}", "Cache-Control": "no-store"})
+
+
+@app.post("/api/flows/runs/{run_id}/studies/{study_id}/judgements", status_code=202)
+def start_flow_judgement(run_id: str, study_id: str, background_tasks: BackgroundTasks) -> dict[str, str]:
+    output_dir = flow_study_dir(run_id, study_id)
+    status = read_run_json(output_dir, "status.json", {})
+    if not isinstance(status, dict) or status.get("generation_state") != "completed" or status.get("num_samples") != 100:
+        raise HTTPException(status_code=409, detail="Generate a 100-patch cohort before VLM review")
+    if not os.environ.get("OPENAI_API_KEY"):
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY is not available to the API process")
+    key = (run_id, study_id)
+    with _active_judgement_lock:
+        if _active_judgements:
+            raise HTTPException(status_code=409, detail="Another VLM judgment job is already running")
+        _active_judgements.add(key)
+    write_flow_status(output_dir, judgement_state="queued", judgement_error=None)
+    background_tasks.add_task(run_flow_judgement_job, run_id, study_id, output_dir)
+    return {"study_id": study_id, "judgement_state": "queued"}
+
+
+@app.get("/api/flows/runs/{run_id}/studies/{study_id}/judgements")
+def get_flow_judgements(run_id: str, study_id: str) -> dict[str, object]:
+    output_dir = flow_study_dir(run_id, study_id)
+    items = read_run_json(output_dir, "judgements.json", {})
+    report = read_run_json(output_dir, "judgement-report.json", {})
+    return {
+        "items": items.get("items", []) if isinstance(items, dict) else [],
         "report": report if isinstance(report, dict) else {},
     }
 

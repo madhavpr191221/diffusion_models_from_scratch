@@ -138,6 +138,65 @@ button:disabled { opacity: .4; cursor: not-allowed; }
 .checkpoint-row { display: grid; grid-template-columns: minmax(190px, 1.5fr) minmax(120px, .7fr) minmax(80px, .4fr); align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--border); color: var(--muted); font: 10px var(--mono); }
 .checkpoint-row > div { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .checkpoint-row b { overflow: hidden; color: var(--text); font-weight: 500; text-overflow: ellipsis; }
+
+.flow-view { padding: 38px 0 24px; }
+.flow-training-monitor { margin: 0 0 28px; }
+.flow-monitor-run { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: baseline; margin: 16px 0 8px; }
+.flow-monitor-run b { color: var(--text); font: 600 13px var(--mono); }
+.flow-monitor-run span, .flow-latest-losses { color: var(--muted); font-size: 12px; }
+.flow-latest-losses { display: flex; flex-wrap: wrap; gap: 10px 26px; padding: 14px 0 4px; }
+.flow-latest-losses b { margin-left: 5px; color: var(--text); font-family: var(--mono); font-weight: 500; }
+.flow-monitor-empty { display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 13px; }
+.flow-monitor-empty b { color: var(--text); }
+.flow-heading { padding: 0 0 24px; }
+.flow-heading h1 { margin: 12px 0 8px; color: var(--text); font: 500 clamp(34px, 4vw, 50px)/1.12 var(--serif); letter-spacing: -.025em; }
+.flow-heading h1 em { color: var(--green); font-weight: 500; }
+.flow-heading p { max-width: 720px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.flow-heading code, .flow-readout code { color: var(--green); font: 11px var(--mono); }
+.flow-controls, .flow-trajectory, .flow-results { padding: 18px; margin-bottom: 14px; }
+.flow-form { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 12px; align-items: end; margin-top: 18px; }
+.flow-form label { display: flex; flex-direction: column; gap: 7px; color: var(--muted); font-size: 11px; }
+.flow-form input, .flow-form select { width: 100%; min-width: 0; height: 38px; padding: 0 10px; color: var(--text); background: #121814; border: 1px solid var(--border); border-radius: 3px; font: 11px var(--mono); }
+.flow-actions { display: flex; flex-wrap: wrap; gap: 8px; grid-column: 1 / -1; }
+.flow-empty { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 18px 0; }
+.flow-empty code { padding: 8px 10px; color: var(--green); background: #101511; border: 1px solid var(--border); font: 10px var(--mono); }
+.flow-error { margin-bottom: 14px; padding: 11px 13px; color: #ffd6c7; background: #40271f; border: 1px solid #78442f; border-radius: 4px; font-size: 12px; }
+.flow-progress { display: grid; gap: 10px; margin: 26px 0 6px; color: var(--muted); font: 11px var(--mono); }
+.flow-progress progress { width: 100%; height: 8px; accent-color: var(--green); }
+.flow-current { display: grid; grid-template-columns: minmax(260px, 450px) 1fr; gap: 24px; align-items: center; margin: 16px 0; }
+.flow-frame { position: relative; margin: 0; overflow: hidden; background: #0e120f; border: 1px solid var(--border); border-radius: 3px; aspect-ratio: 1; }
+.flow-frame img { display: block; width: 100%; height: 100%; image-rendering: pixelated; object-fit: contain; }
+.flow-frame figcaption { position: absolute; left: 10px; bottom: 10px; padding: 6px 8px; color: var(--text); background: #101511e8; font: 9px var(--mono); }
+.flow-readout { display: grid; gap: 7px; color: var(--muted); font-size: 12px; }
+.flow-readout strong { color: var(--text); font: 28px var(--mono); }
+.flow-readout p { max-width: 420px; line-height: 1.6; }
+.flow-slider { width: 100%; margin-top: 14px; accent-color: var(--green); }
+.flow-time-labels, .flow-playback { display: flex; justify-content: space-between; align-items: center; gap: 12px; color: var(--faint); font: 9px var(--mono); }
+.flow-playback { justify-content: flex-start; margin-top: 13px; }
+.flow-playback span { margin-left: auto; }
+.flow-diagnostics { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.flow-single-sample { display: block; width: min(100%, 440px); margin: 14px auto 4px; image-rendering: pixelated; border: 1px solid var(--border); border-radius: 3px; }
+.flow-sample-grid { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 5px; margin-top: 14px; }
+.flow-sample-grid figure { position: relative; margin: 0; aspect-ratio: 1; background: #101410; }
+.flow-sample-grid img { width: 100%; height: 100%; image-rendering: pixelated; object-fit: cover; }
+.flow-sample-grid figcaption { position: absolute; right: 2px; bottom: 2px; padding: 2px 3px; color: var(--text); background: #101511dd; font: 8px var(--mono); }
+.flow-vlm-action { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-top: 17px; padding-top: 14px; border-top: 1px solid var(--border); }
+.flow-vlm-action .panel-copy { flex: 1 1 400px; margin: 0; }
+.flow-vlm-action small { color: var(--faint); font-size: 10px; }
+.flow-report { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }
+.flow-judgment-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 14px; }
+.flow-judgment-list article { display: grid; grid-template-columns: 64px 1fr; gap: 10px; padding: 8px; border: 1px solid var(--border); }
+.flow-judgment-list img { width: 64px; aspect-ratio: 1; image-rendering: pixelated; object-fit: cover; }
+.flow-judgment-list article div { display: grid; gap: 4px; align-content: start; color: var(--muted); font-size: 10px; line-height: 1.45; }
+.flow-judgment-list b { color: var(--text); font: 9px var(--mono); }
+.flow-judgment-list p { margin: 0; }
+@media (max-width: 720px) {
+  .flow-view { padding-top: 28px; }
+  .flow-form { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .flow-current { grid-template-columns: 1fr; }
+  .flow-sample-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .flow-judgment-list { grid-template-columns: 1fr; }
+}
 .checkpoint-row small { color: var(--faint); font-size: 9px; }
 .checkpoint-row > span:last-child { text-align: right; }
 .checkpoint-path { margin-top: 14px; }
